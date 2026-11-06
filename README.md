@@ -9,7 +9,7 @@ multi-size `.ico` files.
 - Non-square images are centre-cropped to a square. JPEG EXIF rotation is honoured.
 - Shapes: **Rounded square** (corner radius 0–50 %, default 22 %), **Circle**, **None**.
 - **Padding** 0–30 % per edge: shrinks the artwork inside the canvas; the mask still covers the full canvas.
-- Live preview on a checkerboard, plus 16/24/32/48 px previews shown at true device pixels with a pixelated zoom.
+- Live preview on a checkerboard, plus a preview of **every selected size** at true device pixels (sizes below ~96 px also get a pixelated zoom).
 - Pick any of 16, 24, 32, 48, 64, 128, 256 (at least one stays selected).
 - Single export (save dialog) or batch export to a folder (progress bar, success/failure summary, `name-1.ico` suffixes instead of overwriting).
 - Optional 512×512 PNG next to every `.ico`.
@@ -22,6 +22,8 @@ All image work runs in Rust (`src-tauri/src/pipeline.rs`). Preview and export us
 1. Decode → centre-crop → if the side is > 1024, downscale **once** to 1024.
 2. Compose a 1024² *master*: Lanczos3-scale the art to `side × (1 − 2·padding)`, centre it on a transparent canvas, then multiply by the shape mask.
 3. Every output size (ICO entries, the 512 PNG, the previews) is a **single** Lanczos3 resample of that master. Nothing is ever downscaled from an already downscaled size.
+
+Resampling uses a dedicated separable Lanczos3 (`resample.rs`): weights precomputed per axis, rows split across cores, no clamping (overshoot is resolved once in `from_premul`). Previews go to the webview as raw RGBA over binary IPC and are painted straight into canvases, so there's no PNG encode/decode or base64 on the slider-drag path.
 
 Details:
 

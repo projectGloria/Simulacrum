@@ -8,6 +8,18 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
+    <!-- Native decorations are off (tauri.conf.json); this is the replacement. Only the bar
+         itself carries data-tauri-drag-region — Tauri v2 checks the event *target*, so the
+         icon/title are pointer-events:none and clicks fall through to the bar. -->
+    <header class="titlebar" data-tauri-drag-region>
+      <img class="tb-icon" src="/src-tauri/icons/32x32.png" alt="" />
+      <span class="tb-title">Simulacrum — Icon Maker</span>
+      <div class="tb-buttons">
+        <button id="winMin" class="tb-btn" title="Minimize" aria-label="Minimize">&#xE921;</button>
+        <button id="winMax" class="tb-btn" title="Maximize" aria-label="Maximize">&#xE922;</button>
+        <button id="winClose" class="tb-btn close" title="Close" aria-label="Close">&#xE8BB;</button>
+      </div>
+    </header>
     <div class="app">
       <aside class="sidebar">
         <div id="drop" class="drop">
@@ -28,7 +40,7 @@
           <p class="muted">It will be centre-cropped to a square, shaped, and exported as a multi-size .ico.</p>
         </div>
         <div id="previewArea" class="preview-area" hidden>
-          <div class="checker big"><img id="mainPreview" alt="Preview" /></div>
+          <div class="checker big"><canvas id="mainPreview" width="512" height="512" aria-label="Preview"></canvas></div>
           <div id="smalls" class="smalls"></div>
           <p id="meta" class="muted meta"></p>
         </div>

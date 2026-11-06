@@ -7,9 +7,10 @@ export type LoadResult =
   | { status: "ok"; id: number; name: string; width: number; height: number; thumb: string; warning: string | null }
   | { status: "error"; name: string; error: string };
 
-export interface Preview {
-  main: string; // data URL, 512 px
-  small: [number, string][]; // [size, data URL]
+/** One rendered square: straight-alpha RGBA, ready for `new ImageData(...)`. */
+export interface Frame {
+  side: number;
+  data: Uint8ClampedArray<ArrayBuffer>;
 }
 
 export type BatchEvent =
@@ -18,7 +19,23 @@ export type BatchEvent =
 
 export const loadImages = (paths: string[]) => invoke<LoadResult[]>("load_images", { paths });
 export const removeImage = (id: number) => invoke<void>("remove_image", { id });
-export const preview = (id: number, settings: Settings) => invoke<Preview>("preview", { id, settings });
+/** First frame is the 512 main preview, then every selected ICO size ascending (see Rust `preview`). */
+export async function preview(id: number, settings: Settings): Promise<Frame[]> {
+  // The command returns `ipc::Response`, which arrives as a raw ArrayBuffer — no JSON parse.
+  const buf = await invoke<ArrayBuffer>("preview", { id, settings });
+  const dv = new DataView(buf);
+  const frames: Frame[] = [];
+  let off = 4;
+  for (let i = dv.getUint32(0, true); i > 0; i--) {
+    const side = dv.getUint32(off, true);
+    off += 4;
+    const len = side * side * 4;
+    // A view, not a copy: frames alias `buf`, which lives as long as they do.
+    frames.push({ side, data: new Uint8ClampedArray(buf, off, len) });
+    off += len;
+  }
+  return frames;
+}
 export const exportSingle = (id: number, path: string, settings: Settings, alsoPng: boolean) =>
   invoke<string[]>("export_single", { id, path, settings, alsoPng });
 

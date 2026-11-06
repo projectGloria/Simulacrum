@@ -17,7 +17,9 @@
         "height": 740,
         "minWidth": 900,
         "minHeight": 600,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "decorations": false,
+        "shadow": true
       }
     ],
     "security": {
@@ -35,7 +37,11 @@
     ],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },
-      "wix": { "version": "1.0.0.1" }
+      "wix": { "version": "1.0.0.1" },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
     }
   }
 }

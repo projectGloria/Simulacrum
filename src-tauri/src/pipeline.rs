@@ -7,7 +7,7 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
-use image::imageops::{self, FilterType};
+use image::imageops;
 use image::{
     DynamicImage, ImageDecoder, ImageEncoder, ImageError, ImageFormat, ImageReader, Rgba,
     Rgba32FImage, RgbaImage,
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::mask::rounded_square_coverage;
+use crate::resample::{self, par_rows};
 
 /// Side of the masked master every output is resampled from. 4× the largest ICO entry and 2×
 /// the 512 PNG — plenty of headroom for Lanczos while keeping a slider-drag re-render cheap.
@@ -164,15 +165,18 @@ pub fn compose(source: &Source, s: &Settings) -> Master {
         Shape::Rounded => Some(s.radius / 100.0),
     };
     if let Some(r) = radius {
-        // The mask spans the whole canvas, not just the padded art (per spec).
+        // The mask spans the whole canvas, not just the padded art (per spec). 1M SDF evals,
+        // so split rows across cores — this is on the slider-drag hot path.
         let radius_px = n as f32 * r;
-        for (x, y, px) in canvas.enumerate_pixels_mut() {
-            let c = rounded_square_coverage(x, y, n, radius_px);
-            if c < 1.0 {
-                // Premultiplied: scaling all four channels is exactly "multiply alpha by coverage".
-                px.0.iter_mut().for_each(|v| *v *= c);
+        par_rows(&mut canvas, (n * 4) as usize, |y, row| {
+            for (x, px) in row.chunks_exact_mut(4).enumerate() {
+                let c = rounded_square_coverage(x as u32, y as u32, n, radius_px);
+                if c < 1.0 {
+                    // Premultiplied: scaling all four channels is exactly "multiply alpha by coverage".
+                    px.iter_mut().for_each(|v| *v *= c);
+                }
             }
-        }
+        });
     }
     let side = n as f32;
     Master { img: canvas, radius, art_lo: off as f32 / side, art_hi: (off + inner) as f32 / side }
@@ -244,19 +248,10 @@ fn from_premul(img: &Rgba32FImage) -> RgbaImage {
     })
 }
 
-/// `image`'s resampler clamps f32 channels to [0,1] *independently*, which destroys the
-/// colour/alpha ratio wherever Lanczos overshoots. Resampling is linear with weights summing
-/// to 1, so mapping v → 0.25 + 0.5·v before and inverting after is exact, and keeps
-/// overshoot (Lanczos3 peaks ≈ ±10%) well inside the clamp range.
+/// Single entry point for every resample in the pipeline. `resample::resize` doesn't clamp,
+/// so Lanczos overshoot survives intact until `from_premul` divides by the unclamped alpha.
 fn resize_premul(img: &Rgba32FImage, side: u32) -> Rgba32FImage {
-    if img.dimensions() == (side, side) {
-        return img.clone();
-    }
-    let mut shifted = img.clone();
-    shifted.pixels_mut().for_each(|p| p.0.iter_mut().for_each(|v| *v = 0.25 + 0.5 * *v));
-    let mut out = imageops::resize(&shifted, side, side, FilterType::Lanczos3);
-    out.pixels_mut().for_each(|p| p.0.iter_mut().for_each(|v| *v = (*v - 0.25) * 2.0));
-    out
+    resample::resize(img, side, side)
 }
 
 #[cfg(test)]

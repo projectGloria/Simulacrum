@@ -21,7 +21,20 @@ h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 h2:first-child { margin-top: 0; }
 .muted { color: var(--muted); }
 
-.app { display: grid; grid-template-columns: 260px 1fr 280px; height: 100vh; }
+body { display: flex; flex-direction: column; }
+.app { display: grid; grid-template-columns: 260px 1fr 280px; flex: 1; min-height: 0; }
+
+/* ---- custom title bar ---- */
+.titlebar { flex: none; height: 32px; display: flex; align-items: center; background: var(--bg); border-bottom: 1px solid var(--border); }
+.tb-icon { width: 16px; height: 16px; margin: 0 10px 0 12px; pointer-events: none; }
+.tb-title { flex: 1; font-size: 12px; color: var(--muted); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-buttons { display: flex; height: 100%; }
+/* Segoe Fluent Icons (Win11) / MDL2 Assets (Win10) share codepoints: native caption glyphs. */
+.tb-btn { width: 46px; height: 100%; border: 0; background: transparent; color: var(--text); font: 10px "Segoe Fluent Icons", "Segoe MDL2 Assets"; cursor: default; }
+.tb-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.tb-btn:active { background: rgba(255, 255, 255, 0.05); }
+.tb-btn.close:hover { background: #c42b1c; color: #fff; }
+.tb-btn.close:active { background: #b22a1b; }
 .sidebar, .panel { background: var(--panel); padding: 16px; overflow-y: auto; }
 .sidebar { border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
 .panel { border-left: 1px solid var(--border); }
@@ -57,7 +70,10 @@ body.loading { cursor: progress; }
 .list-foot { display: flex; justify-content: space-between; align-items: center; min-height: 24px; }
 
 /* ---- stage ---- */
-.stage { display: flex; align-items: center; justify-content: center; overflow: auto; padding: 24px; }
+.stage { display: flex; overflow: auto; padding: 24px; }
+/* margin:auto, not align/justify-content:center: when content overflows, centring via the
+   container pushes the top out of the scrollable area; auto margins collapse to 0 instead. */
+.stage > * { margin: auto; }
 .empty { text-align: center; max-width: 340px; }
 .preview-area { display: flex; flex-direction: column; align-items: center; gap: 24px; }
 /* Checkerboard via conic-gradient: no image asset, crisp at any DPI. */
@@ -69,8 +85,8 @@ body.loading { cursor: progress; }
   justify-content: center;
 }
 .checker.big { width: 288px; height: 288px; }
-.checker.big img { width: 256px; height: 256px; }
-.smalls { display: flex; gap: 20px; align-items: flex-end; }
+.checker.big canvas { width: 256px; height: 256px; }
+.smalls { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; align-items: flex-end; max-width: 100%; }
 .smalls figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .smalls .checker { padding: 6px; background-size: 8px 8px; }
 .smalls figcaption { font-size: 12px; color: var(--muted); }

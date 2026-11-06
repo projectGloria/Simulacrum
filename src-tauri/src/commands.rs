@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use image::imageops::{self, FilterType};
 use serde::Serialize;
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, Response};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
@@ -151,28 +151,31 @@ pub fn remove_image(state: State<'_, Shared>, id: u32) -> AppResult<()> {
 
 // ---- preview ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Preview {
-    main: String,
-    small: Vec<(u32, String)>,
-}
-
 pub const PREVIEW_MAIN: u32 = 512;
-pub const PREVIEW_SMALL: [u32; 4] = [16, 24, 32, 48];
 
+/// Returns raw bytes, not JSON: `ipc::Response` reaches JS as an `ArrayBuffer` with no
+/// serde/base64 step, and the frontend `putImageData`s straight into canvases — no PNG
+/// encode here, no PNG decode there. Layout (little-endian u32s):
+///
+///   [count] then `count` × ([side] [side·side·4 bytes straight-alpha RGBA])
+///
+/// First entry is the 512 main preview, then every *selected* ICO size, ascending.
 #[tauri::command]
-pub async fn preview(state: State<'_, Shared>, id: u32, settings: Settings) -> AppResult<Preview> {
+pub async fn preview(state: State<'_, Shared>, id: u32, settings: Settings) -> AppResult<Response> {
     let s = settings.validated()?;
     let (source, _) = state.get(id)?;
     blocking(move || {
         // Same compose + render path as export → preview is pixel-identical to the output.
         let master = pipeline::compose(&source, &s);
-        let enc = |n| pipeline::encode_png(&pipeline::render(&master, n), true).map(|b| data_url(&b));
-        Ok(Preview {
-            main: enc(PREVIEW_MAIN)?,
-            small: PREVIEW_SMALL.iter().map(|&n| Ok((n, enc(n)?))).collect::<AppResult<_>>()?,
-        })
+        let sides: Vec<u32> = std::iter::once(PREVIEW_MAIN).chain(s.sizes.iter().copied()).collect();
+        let total: usize = 4 + sides.iter().map(|&n| 4 + (n * n * 4) as usize).sum::<usize>();
+        let mut buf = Vec::with_capacity(total);
+        buf.extend_from_slice(&(sides.len() as u32).to_le_bytes());
+        for n in sides {
+            buf.extend_from_slice(&n.to_le_bytes());
+            buf.extend_from_slice(pipeline::render(&master, n).as_raw());
+        }
+        Ok(Response::new(buf))
     })
     .await
 }

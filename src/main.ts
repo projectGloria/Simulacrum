@@ -1,4 +1,5 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { ALL_SIZES, loadPrefs, savePrefs, type Prefs, type Shape } from "./settings";
@@ -31,7 +32,7 @@ const el = {
   clear: $<HTMLButtonElement>("clear"),
   empty: $("empty"),
   previewArea: $("previewArea"),
-  mainPreview: $<HTMLImageElement>("mainPreview"),
+  mainPreview: $<HTMLCanvasElement>("mainPreview"),
   smalls: $("smalls"),
   meta: $("meta"),
   radiusRow: $("radiusRow"),
@@ -99,35 +100,75 @@ async function pump() {
   inFlight = false;
 }
 
-function showPreview(p: api.Preview) {
-  el.mainPreview.src = p.main;
+// Size figures are built once per (size set, DPR) and then only repainted. The old version
+// rebuilt every <img> from fresh data URLs on each slider tick: DOM churn + N image decodes.
+interface SizeView {
+  actual: HTMLCanvasElement;
+  zoom: HTMLCanvasElement | null; // null when the zoom would be 1× (≥ 64 px at 1× DPR)
+}
+const views = new Map<number, SizeView>();
+let viewsKey = "";
+
+function syncSizeViews(sides: number[]) {
   const dpr = window.devicePixelRatio || 1;
+  const key = `${dpr}|${sides.join(",")}`;
+  if (key === viewsKey) return;
+  viewsKey = key;
+  views.clear();
+  const canvas = (side: number, cssWidth: number, cls = "") => {
+    const c = document.createElement("canvas");
+    c.width = c.height = side; // backing store = real icon pixels
+    c.style.width = c.style.height = `${cssWidth}px`;
+    if (cls) c.className = cls;
+    const box = document.createElement("div");
+    box.className = "checker";
+    box.append(c);
+    return [c, box] as const;
+  };
   el.smalls.replaceChildren(
-    ...p.small.map(([size, url]) => {
+    ...sides.map((side) => {
       // Show each size at *device* pixels so 16 px really is 16 screen pixels, plus an
       // integer-multiple pixelated zoom so individual pixels are judgeable.
-      const zoom = Math.max(1, Math.floor((96 * dpr) / size));
+      const zoomBy = Math.max(1, Math.floor((96 * dpr) / side));
       const fig = document.createElement("figure");
-      const actual = new Image();
-      actual.src = url;
-      actual.style.width = `${size / dpr}px`;
-      const big = new Image();
-      big.src = url;
-      big.className = "pixelated";
-      big.style.width = `${(size * zoom) / dpr}px`;
-      const a = document.createElement("div");
-      a.className = "checker";
-      a.append(actual);
-      const b = document.createElement("div");
-      b.className = "checker";
-      b.append(big);
+      const [actual, a] = canvas(side, side / dpr);
+      fig.append(a);
+      let zoom: HTMLCanvasElement | null = null;
+      if (zoomBy > 1) {
+        const [z, b] = canvas(side, (side * zoomBy) / dpr, "pixelated");
+        zoom = z;
+        fig.append(b);
+      }
       const cap = document.createElement("figcaption");
-      cap.textContent = `${size}px`;
-      fig.append(a, b, cap);
+      cap.textContent = `${side}px`;
+      fig.append(cap);
+      views.set(side, { actual, zoom });
       return fig;
     }),
   );
 }
+
+function paint(c: HTMLCanvasElement, f: api.Frame) {
+  // putImageData replaces pixels outright (no compositing), so no clearRect needed.
+  c.getContext("2d")!.putImageData(new ImageData(f.data, f.side, f.side), 0, 0);
+}
+
+function showPreview(frames: api.Frame[]) {
+  const [main, ...sizes] = frames;
+  if (main) paint(el.mainPreview, main);
+  syncSizeViews(sizes.map((f) => f.side));
+  for (const f of sizes) {
+    const v = views.get(f.side);
+    if (!v) continue;
+    paint(v.actual, f);
+    if (v.zoom) paint(v.zoom, f);
+  }
+}
+
+// Moving the window to a monitor with a different scale changes what "1 device pixel" is.
+window.addEventListener("resize", () => {
+  if (!viewsKey.startsWith(`${window.devicePixelRatio || 1}|`)) schedulePreview();
+});
 
 // ---- rendering --------------------------------------------------------------------------
 
@@ -200,9 +241,18 @@ function renderControls() {
   }
 }
 
+// localStorage.setItem is synchronous and `input` fires on every pixel of slider travel, so
+// coalesce writes; the in-memory `prefs` is the source of truth meanwhile.
+let saveTimer = 0;
+function persist() {
+  clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => savePrefs(prefs), 300);
+}
+window.addEventListener("beforeunload", () => savePrefs(prefs));
+
 function update(mutate: (p: Prefs) => void) {
   mutate(prefs);
-  savePrefs(prefs);
+  persist();
   renderControls();
   schedulePreview();
 }
@@ -211,7 +261,6 @@ function update(mutate: (p: Prefs) => void) {
 
 function select(id: number | null) {
   selectedId = id;
-  if (id === null) el.mainPreview.removeAttribute("src");
   renderList();
   renderControls();
   schedulePreview();
@@ -367,6 +416,22 @@ void getCurrentWebview().onDragDropEvent((ev) => {
   else document.body.classList.remove("dragging");
   if (t === "drop") void addPaths(ev.payload.paths);
 });
+
+// ---- title bar ----------------------------------------------------------------------------
+const win = getCurrentWindow();
+const maxBtn = $<HTMLButtonElement>("winMax");
+$("winMin").onclick = () => void win.minimize();
+maxBtn.onclick = () => void win.toggleMaximize();
+$("winClose").onclick = () => void win.close();
+// Max/restore glyph is derived from the real window state (Aero Snap, double-click on the bar
+// and Win+Up all change it without touching our button), so re-read it on every resize.
+async function syncMaxGlyph() {
+  const m = await win.isMaximized();
+  maxBtn.innerHTML = m ? "&#xE923;" : "&#xE922;";
+  maxBtn.title = maxBtn.ariaLabel = m ? "Restore" : "Maximize";
+}
+void win.onResized(() => void syncMaxGlyph());
+void syncMaxGlyph();
 
 renderList();
 renderControls();

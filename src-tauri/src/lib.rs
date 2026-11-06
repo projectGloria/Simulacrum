@@ -8,6 +8,7 @@ pub mod ico;
 pub mod mask;
 pub mod naming;
 pub mod pipeline;
+pub mod resample;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
