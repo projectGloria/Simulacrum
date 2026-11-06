@@ -1,0 +1,31 @@
+[package]
+name = "simulacrum"
+version = "1.0.0-beta.1"
+description = "Shape images and export multi-size .ico files"
+edition = "2021"
+
+[lib]
+# The suffix avoids a name clash between the lib and the bin on Windows (cargo issue #8519).
+name = "simulacrum_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+
+[profile.dev.package."*"]
+# Image decoding/resampling is ~20x slower unoptimized; this keeps `tauri dev` previews snappy.
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

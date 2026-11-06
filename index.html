@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simulacrum — Icon Maker</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div id="drop" class="drop">
+          <p>Drop images here</p>
+          <p class="muted">PNG · JPG · WEBP · BMP</p>
+          <button id="add" class="btn">Browse…</button>
+        </div>
+        <ul id="list" class="list" aria-label="Loaded images"></ul>
+        <div class="list-foot">
+          <span id="count" class="muted"></span>
+          <button id="clear" class="btn ghost small" hidden>Clear all</button>
+        </div>
+      </aside>
+
+      <main class="stage">
+        <div id="empty" class="empty">
+          <p>Load an image to start.</p>
+          <p class="muted">It will be centre-cropped to a square, shaped, and exported as a multi-size .ico.</p>
+        </div>
+        <div id="previewArea" class="preview-area" hidden>
+          <div class="checker big"><img id="mainPreview" alt="Preview" /></div>
+          <div id="smalls" class="smalls"></div>
+          <p id="meta" class="muted meta"></p>
+        </div>
+      </main>
+
+      <section class="panel" aria-label="Settings">
+        <h2>Shape</h2>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="shape" value="rounded" /><span>Rounded</span></label>
+          <label><input type="radio" name="shape" value="circle" /><span>Circle</span></label>
+          <label><input type="radio" name="shape" value="none" /><span>None</span></label>
+        </div>
+
+        <div id="radiusRow" class="slider-row">
+          <label for="radius">Corner radius <output id="radiusOut"></output></label>
+          <input id="radius" type="range" min="0" max="50" step="1" />
+        </div>
+        <div class="slider-row">
+          <label for="padding">Padding <output id="paddingOut"></output></label>
+          <input id="padding" type="range" min="0" max="30" step="1" />
+        </div>
+
+        <h2>Sizes</h2>
+        <div id="sizes" class="sizes"></div>
+
+        <h2>Extras</h2>
+        <label class="check"><input id="alsoPng" type="checkbox" /> Also export 512×512 PNG</label>
+
+        <div class="actions">
+          <button id="exportOne" class="btn primary" disabled>Export .ico…</button>
+          <button id="exportAll" class="btn primary" hidden disabled>Export all…</button>
+        </div>
+
+        <div id="batch" class="batch" hidden>
+          <div class="progress"><div id="bar"></div></div>
+          <p id="batchText" class="muted"></p>
+          <div id="summary"></div>
+        </div>
+      </section>
+    </div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+  </body>
+</html>
