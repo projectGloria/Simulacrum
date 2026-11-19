@@ -185,6 +185,21 @@ Artifacts will be produced in `src-tauri/target/release/`:
 
 ---
 
+## How to Release
+
+GitHub Actions automatically builds the Windows NSIS (`.exe`) and MSI (`.msi`) installers whenever a version tag (`v*`) is pushed or the **Build Installers** workflow is triggered manually.
+
+1. Update the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` (`version` and `bundle.windows.wix.version`), then commit your changes.
+2. Create and push a version tag:
+   ```bash
+   git tag v1.0.0 && git push --tags
+   ```
+3. **Where to download the installers**:
+   - **Tag builds**: Published automatically on the [GitHub Releases](https://github.com/projectGloria/Simulacrum/releases) page (and also available as the **`installers`** artifact on the workflow run).
+   - **Manual builds** (*Actions → Build Installers → Run workflow*): Download the **`installers`** artifact from the completed run in the **Actions** tab.
+
+---
+
 ## Tests & Verification
 
 ### Running Automated Rust Tests
