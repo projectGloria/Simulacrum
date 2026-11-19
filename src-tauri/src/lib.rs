@@ -4,6 +4,8 @@
 
 mod commands;
 pub mod error;
+pub mod folder_icon;
+pub mod icns;
 pub mod ico;
 pub mod mask;
 pub mod naming;
@@ -17,10 +19,17 @@ pub fn run() {
         .manage(commands::Shared::default())
         .invoke_handler(tauri::generate_handler![
             commands::load_images,
+            commands::load_clipboard_image,
             commands::remove_image,
+            commands::set_size_override,
             commands::preview,
+            commands::render_png_bytes,
             commands::export_single,
+            commands::export_icns,
+            commands::export_pack,
+            commands::apply_folder_icon,
             commands::export_batch,
+            commands::cancel_batch,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Simulacrum");

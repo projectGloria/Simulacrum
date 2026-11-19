@@ -7,7 +7,7 @@ pub enum AppError {
     #[error("Could not open \"{path}\": {source}")]
     Open { path: String, source: std::io::Error },
 
-    #[error("\"{path}\" is not a supported image (PNG, JPG, WEBP or BMP).")]
+    #[error("\"{path}\" is not a supported image (PNG, JPG, WEBP, BMP, SVG, TIFF, GIF or ICO).")]
     UnsupportedFormat { path: String },
 
     #[error("\"{path}\" could not be decoded — the file may be corrupt. ({detail})")]

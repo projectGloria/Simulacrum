@@ -22,9 +22,15 @@ fn sample_png(name: &str) -> std::path::PathBuf {
 #[test]
 fn ico_contains_exactly_selected_sizes_with_transparent_corners() {
     let src = pipeline::load(&sample_png("sample-a.png")).unwrap();
-    let s = Settings { shape: Shape::Rounded, radius: 22.0, padding: 0.0, sizes: vec![256, 16, 32] }
-        .validated()
-        .unwrap();
+    let s = Settings {
+        shape: Shape::Rounded,
+        radius: 22.0,
+        padding: 0.0,
+        sizes: vec![256, 16, 32],
+        ..Settings::default()
+    }
+    .validated()
+    .unwrap();
     let bytes = pipeline::build_ico(&pipeline::compose(&src, &s), &s.sizes).unwrap();
     let dir = ico::parse(&bytes).unwrap();
 

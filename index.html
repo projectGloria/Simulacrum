@@ -8,12 +8,9 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <!-- Native decorations are off (tauri.conf.json); this is the replacement. Only the bar
-         itself carries data-tauri-drag-region — Tauri v2 checks the event *target*, so the
-         icon/title are pointer-events:none and clicks fall through to the bar. -->
     <header class="titlebar" data-tauri-drag-region>
       <img class="tb-icon" src="/src-tauri/icons/32x32.png" alt="" />
-      <span class="tb-title">Simulacrum — Icon Maker</span>
+      <span class="tb-title">Simulacrum — Icon Maker <span class="ver">v2.0</span></span>
       <div class="tb-buttons">
         <button id="winMin" class="tb-btn" title="Minimize" aria-label="Minimize">&#xE921;</button>
         <button id="winMax" class="tb-btn" title="Maximize" aria-label="Maximize">&#xE922;</button>
@@ -23,8 +20,8 @@
     <div class="app">
       <aside class="sidebar">
         <div id="drop" class="drop">
-          <p>Drop images here</p>
-          <p class="muted">PNG · JPG · WEBP · BMP</p>
+          <p>Drop images or paste (Ctrl+V)</p>
+          <p class="muted fmt-hint">PNG · JPG · WEBP · BMP · SVG · TIFF · GIF · ICO</p>
           <button id="add" class="btn">Browse…</button>
         </div>
         <ul id="list" class="list" aria-label="Loaded images"></ul>
@@ -36,21 +33,65 @@
 
       <main class="stage">
         <div id="empty" class="empty">
-          <p>Load an image to start.</p>
-          <p class="muted">It will be centre-cropped to a square, shaped, and exported as a multi-size .ico.</p>
+          <p>Load or paste an image to start.</p>
+          <p class="muted">Supports raster graphics, scalable SVG vectors, and existing .ico inspection. Drag on the preview to pan, scroll to zoom.</p>
         </div>
         <div id="previewArea" class="preview-area" hidden>
-          <div class="checker big"><canvas id="mainPreview" width="512" height="512" aria-label="Preview"></canvas></div>
+          <div class="stage-bar">
+            <div class="seg compact" id="backdropSeg" role="radiogroup" aria-label="Preview backdrop">
+              <label><input type="radio" name="backdrop" value="checker" /><span>Checker</span></label>
+              <label><input type="radio" name="backdrop" value="dark" /><span>Win11 Dark</span></label>
+              <label><input type="radio" name="backdrop" value="light" /><span>Win11 Light</span></label>
+              <label><input type="radio" name="backdrop" value="custom" /><span>Color</span></label>
+            </div>
+            <input id="backdropColor" type="color" class="color-dot" title="Custom backdrop color" hidden />
+            <label class="pill-toggle" title="Show 1px grid on zoomed icons">
+              <input id="pixelGrid" type="checkbox" />
+              <span>Grid</span>
+            </label>
+            <button id="compareBtn" class="btn small" type="button" title="Hold (or hold Space) to preview unstyled source">Compare</button>
+            <button id="copyPngBtn" class="btn small" type="button" title="Copy 512×512 PNG to clipboard (Ctrl+C)">Copy PNG</button>
+          </div>
+
+          <div id="mainBox" class="backdrop checker big" title="Drag to pan · Scroll to zoom · Double-click to reset frame">
+            <canvas id="mainPreview" width="512" height="512" aria-label="Preview"></canvas>
+          </div>
+
+          <div id="taskbarStrip" class="taskbar-strip" hidden>
+            <span class="tb-mock-label muted">Taskbar context</span>
+            <div class="tb-mock-bar" id="taskbarMock"></div>
+          </div>
+
           <div id="smalls" class="smalls"></div>
           <p id="meta" class="muted meta"></p>
         </div>
       </main>
 
       <section class="panel" aria-label="Settings">
+        <div class="preset-row">
+          <select id="presetSelect" aria-label="Preset"></select>
+          <button id="savePresetBtn" class="btn small" type="button" title="Save current settings as preset">Save</button>
+          <button id="deletePresetBtn" class="btn small ghost" type="button" title="Delete selected custom preset" hidden>Del</button>
+        </div>
+        <div id="presetSaveRow" class="preset-save-row" hidden>
+          <input id="presetName" type="text" placeholder="Preset name…" maxlength="48" />
+          <button id="presetSaveOk" class="btn small primary" type="button">OK</button>
+          <button id="presetSaveCancel" class="btn small" type="button">Cancel</button>
+        </div>
+
+        <div id="itemOverrideBar" class="override-bar" hidden>
+          <label class="check"><input id="itemCustom" type="checkbox" /> Custom for this item</label>
+          <button id="applyAllBtn" class="btn small ghost" type="button" title="Apply these settings to all items">Apply to all</button>
+        </div>
+
         <h2>Shape</h2>
-        <div class="seg" role="radiogroup">
+        <div class="seg shape-grid" role="radiogroup">
           <label><input type="radio" name="shape" value="rounded" /><span>Rounded</span></label>
+          <label><input type="radio" name="shape" value="squircle" /><span>Squircle</span></label>
           <label><input type="radio" name="shape" value="circle" /><span>Circle</span></label>
+          <label><input type="radio" name="shape" value="hexagon" /><span>Hex</span></label>
+          <label><input type="radio" name="shape" value="octagon" /><span>Oct</span></label>
+          <label><input type="radio" name="shape" value="shield" /><span>Shield</span></label>
           <label><input type="radio" name="shape" value="none" /><span>None</span></label>
         </div>
 
@@ -63,15 +104,131 @@
           <input id="padding" type="range" min="0" max="30" step="1" />
         </div>
 
-        <h2>Sizes</h2>
+        <details class="group">
+          <summary>Framing &amp; Transform</summary>
+          <div class="group-body">
+            <div class="seg compact" role="radiogroup">
+              <label><input type="radio" name="fitMode" value="crop" /><span>Crop (Fill)</span></label>
+              <label><input type="radio" name="fitMode" value="contain" /><span>Contain (Fit)</span></label>
+            </div>
+            <div class="slider-row">
+              <label for="zoom">Zoom <output id="zoomOut"></output></label>
+              <input id="zoom" type="range" min="0.5" max="4" step="0.05" />
+            </div>
+            <div class="btn-row">
+              <button id="rotLeft" class="btn small" type="button" title="Rotate 90° CCW">↺ 90°</button>
+              <button id="rotRight" class="btn small" type="button" title="Rotate 90° CW">↻ 90°</button>
+              <button id="flipH" class="btn small" type="button">Flip H</button>
+              <button id="flipV" class="btn small" type="button">Flip V</button>
+              <button id="resetFrame" class="btn small ghost" type="button">Reset</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="group">
+          <summary>Backdrop &amp; Effects</summary>
+          <div class="group-body">
+            <div class="seg compact" role="radiogroup">
+              <label><input type="radio" name="bgMode" value="transparent" /><span>None</span></label>
+              <label><input type="radio" name="bgMode" value="solid" /><span>Solid</span></label>
+              <label><input type="radio" name="bgMode" value="linear" /><span>Linear</span></label>
+              <label><input type="radio" name="bgMode" value="radial" /><span>Radial</span></label>
+            </div>
+            <div id="bgControls" class="sub-controls" hidden>
+              <div class="color-row">
+                <label>Color 1 <input id="bgColor1" type="color" /></label>
+                <label id="bgColor2Wrap">Color 2 <input id="bgColor2" type="color" /></label>
+              </div>
+              <div id="bgAngleRow" class="slider-row">
+                <label for="bgAngle">Gradient angle <output id="bgAngleOut"></output></label>
+                <input id="bgAngle" type="range" min="0" max="360" step="5" />
+              </div>
+            </div>
+
+            <div class="slider-row">
+              <label for="borderWidth">Inner border <output id="borderWidthOut"></output></label>
+              <input id="borderWidth" type="range" min="0" max="10" step="0.5" />
+            </div>
+            <div id="borderControls" class="sub-controls" hidden>
+              <div class="color-row">
+                <label>Border color <input id="borderColor" type="color" /></label>
+              </div>
+              <div class="slider-row">
+                <label for="borderOpacity">Border opacity <output id="borderOpacityOut"></output></label>
+                <input id="borderOpacity" type="range" min="0" max="100" step="1" />
+              </div>
+            </div>
+
+            <label class="check mt-sm"><input id="shadow" type="checkbox" /> Soft drop shadow</label>
+            <div id="shadowControls" class="sub-controls" hidden>
+              <div class="slider-row">
+                <label for="shadowBlur">Blur <output id="shadowBlurOut"></output></label>
+                <input id="shadowBlur" type="range" min="1" max="12" step="0.5" />
+              </div>
+              <div class="slider-row">
+                <label for="shadowOpacity">Opacity <output id="shadowOpacityOut"></output></label>
+                <input id="shadowOpacity" type="range" min="0" max="100" step="1" />
+              </div>
+              <div class="slider-row">
+                <label for="shadowOffsetY">Y offset <output id="shadowOffsetYOut"></output></label>
+                <input id="shadowOffsetY" type="range" min="-8" max="12" step="0.5" />
+              </div>
+            </div>
+
+            <div class="mt-sm">
+              <div class="field-label">Corner badge</div>
+              <div class="seg compact" role="radiogroup">
+                <label><input type="radio" name="badgeMode" value="none" /><span>Off</span></label>
+                <label><input type="radio" name="badgeMode" value="dot" /><span>Dot</span></label>
+                <label><input type="radio" name="badgeMode" value="ring" /><span>Ring</span></label>
+              </div>
+            </div>
+            <div id="badgeControls" class="sub-controls" hidden>
+              <div class="color-row">
+                <label>Corner
+                  <select id="badgeCorner">
+                    <option value="bottomright">Bottom-Right</option>
+                    <option value="topright">Top-Right</option>
+                    <option value="bottomleft">Bottom-Left</option>
+                    <option value="topleft">Top-Left</option>
+                  </select>
+                </label>
+                <label>Color <input id="badgeColor" type="color" /></label>
+              </div>
+              <div class="slider-row">
+                <label for="badgeSize">Badge size <output id="badgeSizeOut"></output></label>
+                <input id="badgeSize" type="range" min="8" max="35" step="1" />
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <h2>Sizes &amp; Optical</h2>
         <div id="sizes" class="sizes"></div>
+        <div class="slider-row">
+          <label for="sharpen">Small-size crispness <output id="sharpenOut"></output></label>
+          <input id="sharpen" type="range" min="0" max="100" step="5" />
+        </div>
 
         <h2>Extras</h2>
-        <label class="check"><input id="alsoPng" type="checkbox" /> Also export 512×512 PNG</label>
+        <div class="extras-list">
+          <label class="check"><input id="alsoPng" type="checkbox" /> Also export 512×512 PNG</label>
+          <label class="check"><input id="alsoPng1024" type="checkbox" /> Also export 1024×1024 PNG</label>
+          <label class="check" title="Write 32-bit DIB BMP payloads for 16–48px entries">
+            <input id="legacyBmp" type="checkbox" /> Legacy Win32 BMP+PNG .ico
+          </label>
+        </div>
 
         <div class="actions">
           <button id="exportOne" class="btn primary" disabled>Export .ico…</button>
           <button id="exportAll" class="btn primary" hidden disabled>Export all…</button>
+          <button id="cancelBatch" class="btn danger" hidden>Cancel batch</button>
+          <div class="secondary-actions">
+            <button id="exportIcns" class="btn small" disabled>macOS .icns…</button>
+            <button id="exportTauri" class="btn small" disabled>Tauri Pack…</button>
+            <button id="exportWeb" class="btn small" disabled>Web/PWA Pack…</button>
+            <button id="applyFolder" class="btn small" disabled>Apply to Folder…</button>
+          </div>
         </div>
 
         <div id="batch" class="batch" hidden>

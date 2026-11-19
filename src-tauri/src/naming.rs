@@ -28,11 +28,22 @@ pub fn sanitize_stem(stem: &str) -> String {
 /// `dir` nor was already handed out in this batch. `taken` is lowercase because NTFS is
 /// case-insensitive. Appends `-1`, `-2`, … on collision — never overwrites.
 pub fn unique_stem(dir: &Path, stem: &str, with_png: bool, taken: &mut HashSet<String>) -> String {
+    unique_stem_opts(dir, stem, with_png, false, taken)
+}
+
+pub fn unique_stem_opts(
+    dir: &Path,
+    stem: &str,
+    with_png: bool,
+    with_png_1024: bool,
+    taken: &mut HashSet<String>,
+) -> String {
     let base = sanitize_stem(stem);
     let free = |s: &str| {
         !taken.contains(&s.to_lowercase())
             && !dir.join(format!("{s}.ico")).exists()
             && !(with_png && dir.join(format!("{s}.png")).exists())
+            && !(with_png_1024 && dir.join(format!("{s}-1024.png")).exists())
     };
     let chosen = std::iter::once(base.clone())
         .chain((1u32..).map(|i| format!("{base}-{i}")))

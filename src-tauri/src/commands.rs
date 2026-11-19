@@ -4,22 +4,27 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use image::imageops::{self, FilterType};
+use image::RgbaImage;
 use serde::Serialize;
 use tauri::ipc::{Channel, Response};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::naming::unique_stem;
-use crate::pipeline::{self, Settings, Source, PNG_EXPORT_SIDE};
+use crate::naming::unique_stem_opts;
+use crate::pipeline::{
+    self, IcoEntryInfo, PackKind, Settings, Shape, Source, ALLOWED_SIZES, PNG_1024_SIDE,
+    PNG_EXPORT_SIDE,
+};
 
 struct Item {
     source: Arc<Source>,
     stem: String,
+    overrides: HashMap<u32, RgbaImage>,
 }
 
 #[derive(Default)]
@@ -27,6 +32,7 @@ pub struct AppState {
     next_id: AtomicU32,
     items: Mutex<HashMap<u32, Item>>,
     batch_running: AtomicBool,
+    batch_cancel: AtomicBool,
 }
 
 /// Commands borrow `State<'_>`, but blocking closures must be `'static` — so the state is an
@@ -34,9 +40,12 @@ pub struct AppState {
 pub type Shared = Arc<AppState>;
 
 impl AppState {
-    fn get(&self, id: u32) -> AppResult<(Arc<Source>, String)> {
+    fn get(&self, id: u32) -> AppResult<(Arc<Source>, String, HashMap<u32, RgbaImage>)> {
         let items = self.items.lock().map_err(|_| AppError::Internal("state lock poisoned".into()))?;
-        items.get(&id).map(|i| (i.source.clone(), i.stem.clone())).ok_or(AppError::UnknownItem)
+        items
+            .get(&id)
+            .map(|i| (i.source.clone(), i.stem.clone(), i.overrides.clone()))
+            .ok_or(AppError::UnknownItem)
     }
 }
 
@@ -53,7 +62,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + '
 }
 
 /// Write via a temp file + rename so a failure (disk full, AV lock) never leaves a truncated
-/// .ico where a good one used to be. `fs::rename` replaces atomically on NTFS.
+/// file where a good one used to be. `fs::rename` replaces atomically on NTFS.
 fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let tmp = path.with_extension("simulacrum-tmp");
     std::fs::write(&tmp, bytes).map_err(|e| AppError::write(path, e))?;
@@ -63,10 +72,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
     })
 }
 
-/// Compose once, then write the .ico (and optional 512 PNG) from that same master.
-fn export_one(source: &Source, s: &Settings, ico_path: &Path, also_png: bool) -> AppResult<Vec<String>> {
-    let master = pipeline::compose(source, s);
-    write_atomic(ico_path, &pipeline::build_ico(&master, &s.sizes)?)?;
+/// Compose once, then write the .ico (and optional 512 / 1024 PNGs) from that same master.
+fn export_one(
+    source: &Source,
+    overrides: &HashMap<u32, RgbaImage>,
+    s: &Settings,
+    ico_path: &Path,
+    also_png: bool,
+    also_png_1024: bool,
+) -> AppResult<Vec<String>> {
+    let master = pipeline::compose_with_overrides(source, s, Some(overrides));
+    write_atomic(ico_path, &pipeline::build_ico_with_options(&master, &s.sizes, s.legacy_bmp)?)?;
     let mut written = vec![ico_path.display().to_string()];
     if also_png {
         let png_path = ico_path.with_extension("png");
@@ -74,7 +90,22 @@ fn export_one(source: &Source, s: &Settings, ico_path: &Path, also_png: bool) ->
         write_atomic(&png_path, &png)?;
         written.push(png_path.display().to_string());
     }
+    if also_png_1024 {
+        let stem = ico_path
+            .file_stem()
+            .and_then(|st| st.to_str())
+            .unwrap_or("icon");
+        let png_1024_path = ico_path.with_file_name(format!("{stem}-1024.png"));
+        let png = pipeline::encode_png(&pipeline::render(&master, PNG_1024_SIDE), false)?;
+        write_atomic(&png_1024_path, &png)?;
+        written.push(png_1024_path.display().to_string());
+    }
     Ok(written)
+}
+
+fn make_thumb(source: &Source) -> AppResult<String> {
+    let thumb = imageops::resize(&source.img, 64, 64, FilterType::Triangle);
+    Ok(data_url(&pipeline::encode_png(&thumb, true)?))
 }
 
 // ---- load / remove ---------------------------------------------------------------------
@@ -83,17 +114,44 @@ fn export_one(source: &Source, s: &Settings, ico_path: &Path, also_png: bool) ->
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum LoadResult {
     #[serde(rename_all = "camelCase")]
-    Ok { id: u32, name: String, width: u32, height: u32, thumb: String, warning: Option<String> },
+    Ok {
+        id: u32,
+        name: String,
+        width: u32,
+        height: u32,
+        thumb: String,
+        warning: Option<String>,
+        is_svg: bool,
+        ico_entries: Option<Vec<IcoEntryInfo>>,
+    },
     #[serde(rename_all = "camelCase")]
     Error { name: String, error: String },
+}
+
+fn register_source(state: &AppState, name: String, stem: String, source: Source, thumb: String) -> AppResult<LoadResult> {
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let r = LoadResult::Ok {
+        id,
+        name,
+        width: source.orig_w,
+        height: source.orig_h,
+        thumb,
+        warning: source.warning(),
+        is_svg: source.is_svg,
+        ico_entries: source.ico_entries.clone(),
+    };
+    state
+        .items
+        .lock()
+        .map_err(|_| AppError::Internal("state lock poisoned".into()))?
+        .insert(id, Item { source: Arc::new(source), stem, overrides: HashMap::new() });
+    Ok(r)
 }
 
 #[tauri::command]
 pub async fn load_images(state: State<'_, Shared>, paths: Vec<String>) -> AppResult<Vec<LoadResult>> {
     let state = state.inner().clone();
     blocking(move || {
-        // Decode in parallel (scoped threads, bounded by core count): big JPEGs are the slow
-        // part of adding a batch, and each decode is independent.
         let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
         let mut out = Vec::with_capacity(paths.len());
         for chunk in paths.chunks(workers) {
@@ -110,22 +168,8 @@ pub async fn load_images(state: State<'_, Shared>, paths: Vec<String>) -> AppRes
                 let res = res.unwrap_or_else(|_| Err(AppError::Internal("decoder panicked".into())));
                 out.push(match res {
                     Ok((source, thumb)) => {
-                        let id = state.next_id.fetch_add(1, Ordering::Relaxed);
                         let stem = path.file_stem().map_or("icon".into(), |s| s.to_string_lossy().into_owned());
-                        let r = LoadResult::Ok {
-                            id,
-                            name,
-                            width: source.orig_w,
-                            height: source.orig_h,
-                            thumb,
-                            warning: source.warning(),
-                        };
-                        state
-                            .items
-                            .lock()
-                            .map_err(|_| AppError::Internal("state lock poisoned".into()))?
-                            .insert(id, Item { source: Arc::new(source), stem });
-                        r
+                        register_source(&state, name, stem, source, thumb)?
                     }
                     Err(e) => LoadResult::Error { name, error: e.to_string() },
                 });
@@ -138,9 +182,31 @@ pub async fn load_images(state: State<'_, Shared>, paths: Vec<String>) -> AppRes
 
 fn load_one(path: &Path) -> AppResult<(Source, String)> {
     let source = pipeline::load(path)?;
-    // Thumbnail fidelity doesn't matter; Triangle is ~5x cheaper than Lanczos here.
-    let thumb = imageops::resize(&source.img, 64, 64, FilterType::Triangle);
-    Ok((source, data_url(&pipeline::encode_png(&thumb, true)?)))
+    let thumb = make_thumb(&source)?;
+    Ok((source, thumb))
+}
+
+#[tauri::command]
+pub async fn load_clipboard_image(
+    state: State<'_, Shared>,
+    name: String,
+    bytes: Vec<u8>,
+) -> AppResult<LoadResult> {
+    let state = state.inner().clone();
+    blocking(move || {
+        let safe_name = if name.trim().is_empty() { "clipboard.png".to_string() } else { name };
+        let stem = Path::new(&safe_name)
+            .file_stem()
+            .map_or("clipboard".into(), |s| s.to_string_lossy().into_owned());
+        match pipeline::load_bytes(&bytes, &safe_name) {
+            Ok(source) => {
+                let thumb = make_thumb(&source)?;
+                register_source(&state, safe_name, stem, source, thumb)
+            }
+            Err(e) => Ok(LoadResult::Error { name: safe_name, error: e.to_string() }),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -149,24 +215,67 @@ pub fn remove_image(state: State<'_, Shared>, id: u32) -> AppResult<()> {
     Ok(())
 }
 
+#[tauri::command]
+pub async fn set_size_override(
+    state: State<'_, Shared>,
+    id: u32,
+    size: u32,
+    path: Option<String>,
+) -> AppResult<Vec<u32>> {
+    if !ALLOWED_SIZES.contains(&size) {
+        return Err(AppError::InvalidSettings(format!("unsupported override size {size}")));
+    }
+    let state = state.inner().clone();
+    blocking(move || {
+        let override_img = match path {
+            Some(p) => {
+                let src = pipeline::load(Path::new(&p))?;
+                if src.img.dimensions() == (size, size) && !src.is_svg {
+                    src.img
+                } else {
+                    let s = Settings {
+                        shape: Shape::None,
+                        padding: 0.0,
+                        sizes: vec![size],
+                        ..Settings::default()
+                    };
+                    pipeline::render(&pipeline::compose(&src, &s), size)
+                }
+            }
+            None => {
+                let mut items =
+                    state.items.lock().map_err(|_| AppError::Internal("state lock poisoned".into()))?;
+                let item = items.get_mut(&id).ok_or(AppError::UnknownItem)?;
+                item.overrides.remove(&size);
+                let mut keys: Vec<u32> = item.overrides.keys().copied().collect();
+                keys.sort_unstable();
+                return Ok(keys);
+            }
+        };
+
+        let mut items =
+            state.items.lock().map_err(|_| AppError::Internal("state lock poisoned".into()))?;
+        let item = items.get_mut(&id).ok_or(AppError::UnknownItem)?;
+        item.overrides.insert(size, override_img);
+        let mut keys: Vec<u32> = item.overrides.keys().copied().collect();
+        keys.sort_unstable();
+        Ok(keys)
+    })
+    .await
+}
+
 // ---- preview ---------------------------------------------------------------------------
 
 pub const PREVIEW_MAIN: u32 = 512;
 
 /// Returns raw bytes, not JSON: `ipc::Response` reaches JS as an `ArrayBuffer` with no
-/// serde/base64 step, and the frontend `putImageData`s straight into canvases — no PNG
-/// encode here, no PNG decode there. Layout (little-endian u32s):
-///
-///   [count] then `count` × ([side] [side·side·4 bytes straight-alpha RGBA])
-///
-/// First entry is the 512 main preview, then every *selected* ICO size, ascending.
+/// serde/base64 step, and the frontend `putImageData`s straight into canvases.
 #[tauri::command]
 pub async fn preview(state: State<'_, Shared>, id: u32, settings: Settings) -> AppResult<Response> {
     let s = settings.validated()?;
-    let (source, _) = state.get(id)?;
+    let (source, _, overrides) = state.get(id)?;
     blocking(move || {
-        // Same compose + render path as export → preview is pixel-identical to the output.
-        let master = pipeline::compose(&source, &s);
+        let master = pipeline::compose_with_overrides(&source, &s, Some(&overrides));
         let sides: Vec<u32> = std::iter::once(PREVIEW_MAIN).chain(s.sizes.iter().copied()).collect();
         let total: usize = 4 + sides.iter().map(|&n| 4 + (n * n * 4) as usize).sum::<usize>();
         let mut buf = Vec::with_capacity(total);
@@ -180,6 +289,24 @@ pub async fn preview(state: State<'_, Shared>, id: u32, settings: Settings) -> A
     .await
 }
 
+#[tauri::command]
+pub async fn render_png_bytes(
+    state: State<'_, Shared>,
+    id: u32,
+    settings: Settings,
+    size: u32,
+) -> AppResult<Response> {
+    let s = settings.validated()?;
+    let (source, _, overrides) = state.get(id)?;
+    let side = size.clamp(16, 1024);
+    blocking(move || {
+        let master = pipeline::compose_with_overrides(&source, &s, Some(&overrides));
+        let png = pipeline::encode_png(&pipeline::render(&master, side), false)?;
+        Ok(Response::new(png))
+    })
+    .await
+}
+
 // ---- export ----------------------------------------------------------------------------
 
 #[tauri::command]
@@ -189,14 +316,74 @@ pub async fn export_single(
     path: String,
     settings: Settings,
     also_png: bool,
+    also_png_1024: Option<bool>,
 ) -> AppResult<Vec<String>> {
     let s = settings.validated()?;
-    let (source, _) = state.get(id)?;
+    let (source, _, overrides) = state.get(id)?;
     let mut path = PathBuf::from(path);
     if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("ico")) {
         path.set_extension("ico");
     }
-    blocking(move || export_one(&source, &s, &path, also_png)).await
+    let also_1024 = also_png_1024.unwrap_or(false);
+    blocking(move || export_one(&source, &overrides, &s, &path, also_png, also_1024)).await
+}
+
+#[tauri::command]
+pub async fn export_icns(
+    state: State<'_, Shared>,
+    id: u32,
+    path: String,
+    settings: Settings,
+) -> AppResult<String> {
+    let s = settings.validated()?;
+    let (source, _, overrides) = state.get(id)?;
+    let mut path = PathBuf::from(path);
+    if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("icns")) {
+        path.set_extension("icns");
+    }
+    blocking(move || {
+        let master = pipeline::compose_with_overrides(&source, &s, Some(&overrides));
+        let bytes = crate::icns::encode(&master)?;
+        write_atomic(&path, &bytes)?;
+        Ok(path.display().to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn export_pack(
+    state: State<'_, Shared>,
+    id: u32,
+    out_dir: String,
+    pack: PackKind,
+    settings: Settings,
+) -> AppResult<Vec<String>> {
+    let s = settings.validated()?;
+    let (source, _, overrides) = state.get(id)?;
+    let dir = PathBuf::from(&out_dir);
+    blocking(move || {
+        let master = pipeline::compose_with_overrides(&source, &s, Some(&overrides));
+        pipeline::export_pack(&master, &dir, pack)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn apply_folder_icon(
+    state: State<'_, Shared>,
+    id: u32,
+    folder: String,
+    settings: Settings,
+) -> AppResult<String> {
+    let s = settings.validated()?;
+    let (source, _, overrides) = state.get(id)?;
+    let dir = PathBuf::from(&folder);
+    blocking(move || {
+        let master = pipeline::compose_with_overrides(&source, &s, Some(&overrides));
+        let ico_bytes = pipeline::build_ico_with_options(&master, &s.sizes, s.legacy_bmp)?;
+        crate::folder_icon::apply_to_folder(&dir, &ico_bytes)
+    })
+    .await
 }
 
 #[derive(Serialize, Clone)]
@@ -212,11 +399,16 @@ pub enum BatchEvent {
     #[serde(rename_all = "camelCase")]
     Progress { done: usize, total: usize, name: String },
     #[serde(rename_all = "camelCase")]
-    Finished { ok: usize, failed: Vec<Failure>, out_dir: String },
+    Finished { ok: usize, failed: Vec<Failure>, out_dir: String, cancelled: bool },
 }
 
-/// Returns as soon as the worker thread starts; progress streams over `on_event`. A per-call
-/// `Channel` (vs. global `emit`) is ordered and can't be heard by a stale listener.
+#[tauri::command]
+pub fn cancel_batch(state: State<'_, Shared>) -> AppResult<()> {
+    state.batch_cancel.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Returns as soon as the worker coordinator starts; progress streams over `on_event`.
 #[tauri::command]
 pub fn export_batch(
     state: State<'_, Shared>,
@@ -224,9 +416,17 @@ pub fn export_batch(
     out_dir: String,
     settings: Settings,
     also_png: bool,
+    also_png_1024: Option<bool>,
+    item_settings: Option<HashMap<u32, Settings>>,
     on_event: Channel<BatchEvent>,
 ) -> AppResult<()> {
-    let s = settings.validated()?;
+    let default_s = settings.validated()?;
+    let mut validated_overrides = HashMap::new();
+    if let Some(map) = item_settings {
+        for (id, raw_s) in map {
+            validated_overrides.insert(id, raw_s.validated()?);
+        }
+    }
     let dir = PathBuf::from(&out_dir);
     if !dir.is_dir() {
         return Err(AppError::Write {
@@ -237,31 +437,83 @@ pub fn export_batch(
     if state.batch_running.swap(true, Ordering::AcqRel) {
         return Err(AppError::Internal("a batch export is already running".into()));
     }
-    // Snapshot the items now: removing one from the list mid-batch must not change this run.
-    let jobs: Vec<_> = ids.iter().map(|&id| (id, state.get(id))).collect();
+    state.batch_cancel.store(false, Ordering::Release);
+
+    let also_1024 = also_png_1024.unwrap_or(false);
+    let mut taken = HashSet::new();
+    let jobs: Vec<_> = ids
+        .iter()
+        .map(|&id| {
+            let item_res = state.get(id).map(|(source, stem, overrides)| {
+                let unique = unique_stem_opts(&dir, &stem, also_png, also_1024, &mut taken);
+                let path = dir.join(format!("{unique}.ico"));
+                let item_s = validated_overrides.get(&id).cloned().unwrap_or_else(|| default_s.clone());
+                (source, overrides, item_s, path, stem)
+            });
+            (id, item_res)
+        })
+        .collect();
     let state = state.inner().clone();
 
     std::thread::spawn(move || {
         let total = jobs.len();
-        let mut taken = HashSet::new();
-        let (mut ok, mut failed) = (0, Vec::new());
-        for (done, (id, job)) in jobs.into_iter().enumerate() {
-            let label = job.as_ref().map_or_else(|_| format!("item #{id}"), |(_, stem)| stem.clone());
-            let result = job.and_then(|(source, stem)| {
-                let stem = unique_stem(&dir, &stem, also_png, &mut taken);
-                let path = dir.join(format!("{stem}.ico"));
-                // A panic in one image must not kill the thread and leave the UI spinning.
-                catch_unwind(AssertUnwindSafe(|| export_one(&source, &s, &path, also_png)))
-                    .unwrap_or_else(|_| Err(AppError::Internal("encoder panicked".into())))
-            });
-            match result {
-                Ok(_) => ok += 1,
-                Err(e) => failed.push(Failure { name: label.clone(), error: e.to_string() }),
+        let done_ctr = AtomicUsize::new(0);
+        let ok_ctr = AtomicUsize::new(0);
+        let failed = Mutex::new(Vec::<Failure>::new());
+        let event_lock = Mutex::new(());
+        let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(4).max(1);
+        let next_idx = AtomicUsize::new(0);
+
+        std::thread::scope(|sc| {
+            for _ in 0..workers {
+                sc.spawn(|| {
+                    loop {
+                        if state.batch_cancel.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        let Some((id, job)) = jobs.get(idx) else {
+                            break;
+                        };
+                        let label = job
+                            .as_ref()
+                            .map_or_else(|_| format!("item #{id}"), |(_, _, _, _, stem)| stem.clone());
+                        let result = match job {
+                            Ok((source, overrides, item_s, path, _)) => catch_unwind(AssertUnwindSafe(|| {
+                                export_one(source, overrides, item_s, path, also_png, also_1024)
+                            }))
+                            .unwrap_or_else(|_| Err(AppError::Internal("encoder panicked".into()))),
+                            Err(e) => Err(AppError::Internal(e.to_string())),
+                        };
+                        match result {
+                            Ok(_) => {
+                                ok_ctr.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                if let Ok(mut f) = failed.lock() {
+                                    f.push(Failure { name: label.clone(), error: e.to_string() });
+                                }
+                            }
+                        }
+                        let done = done_ctr.fetch_add(1, Ordering::AcqRel) + 1;
+                        if let Ok(_g) = event_lock.lock() {
+                            let _ = on_event.send(BatchEvent::Progress { done, total, name: label });
+                        }
+                    }
+                });
             }
-            let _ = on_event.send(BatchEvent::Progress { done: done + 1, total, name: label });
-        }
+        });
+
+        let cancelled = state.batch_cancel.load(Ordering::Acquire);
+        let ok = ok_ctr.load(Ordering::Acquire);
+        let failed = failed.into_inner().unwrap_or_default();
         state.batch_running.store(false, Ordering::Release);
-        let _ = on_event.send(BatchEvent::Finished { ok, failed, out_dir: dir.display().to_string() });
+        let _ = on_event.send(BatchEvent::Finished {
+            ok,
+            failed,
+            out_dir: dir.display().to_string(),
+            cancelled,
+        });
     });
     Ok(())
 }
