@@ -22,6 +22,10 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif", "ico"] }
 resvg = "0.50"
 
+[dev-dependencies]
+# Already in the lockfile via resvg; checks that the generated Android XML is well-formed.
+roxmltree = "0.21"
+
 [profile.dev.package."*"]
 # Image decoding/resampling is ~20x slower unoptimized; this keeps `tauri dev` previews snappy.
 opt-level = 3

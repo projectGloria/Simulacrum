@@ -6,8 +6,46 @@ export type FitMode = "crop" | "contain";
 export type BgMode = "transparent" | "solid" | "linear" | "radial";
 export type BadgeMode = "none" | "dot" | "ring";
 export type BadgeCorner = "bottomright" | "topright" | "bottomleft" | "topleft";
-export type BackdropMode = "checker" | "dark" | "light" | "custom";
+export type BackdropMode = "checker" | "dark" | "light" | "custom" | "android";
 export type PackKind = "tauri" | "web";
+export type AndroidBgMode = "auto" | "color" | "image";
+export type AndroidAnchor = "center" | "bottom";
+export type AndroidMono = "off" | "auto" | "custom";
+
+/** Android adaptive-icon options. `scale` is % of the visible 72 dp; offsets are dp. */
+export interface AndroidSettings {
+  bgMode: AndroidBgMode;
+  bgColor: string;
+  flatten: boolean;
+  scale: number;
+  anchor: AndroidAnchor;
+  offsetX: number;
+  offsetY: number;
+  mono: AndroidMono;
+  monoThreshold: number;
+  stripCorners: boolean;
+  legacy: boolean;
+}
+
+export const ANDROID_SCALE_PRESETS = {
+  fullBleed: 110,
+  fitVisible: 100,
+  safeZone: Math.round((66 / 72) * 1000) / 10, // 91.7
+} as const;
+
+export const DEFAULT_ANDROID: AndroidSettings = {
+  bgMode: "auto",
+  bgColor: "#ffffff",
+  flatten: false,
+  scale: 100,
+  anchor: "center",
+  offsetX: 0,
+  offsetY: 0,
+  mono: "off",
+  monoThreshold: 20,
+  stripCorners: true,
+  legacy: false,
+};
 
 export const DEFAULT_SIZES = [16, 24, 32, 48, 64, 128, 256] as const;
 export const ALL_SIZES = [16, 20, 24, 32, 40, 48, 60, 64, 96, 128, 256] as const;
@@ -47,6 +85,8 @@ export interface Settings {
 
   sharpen: number;
   legacyBmp: boolean;
+
+  android: AndroidSettings;
 }
 
 export interface Preset {
@@ -64,6 +104,8 @@ export interface Prefs {
   backdropColor: string;
   pixelGrid: boolean;
   presets: Preset[];
+  /** Folder last opened in the Directory reader; re-scanned on launch. */
+  lastProject: string | null;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -95,6 +137,7 @@ export const DEFAULT_SETTINGS: Settings = {
   badgeSize: 20,
   sharpen: 0,
   legacyBmp: false,
+  android: { ...DEFAULT_ANDROID },
 };
 
 export const BUILTIN_PRESETS: Preset[] = [
@@ -195,6 +238,7 @@ export const DEFAULTS: Prefs = {
   backdropColor: "#2b303b",
   pixelGrid: false,
   presets: [],
+  lastProject: null,
 };
 
 const SHAPES: readonly Shape[] = ["rounded", "squircle", "circle", "hexagon", "octagon", "shield", "none"];
@@ -202,7 +246,10 @@ const FIT_MODES: readonly FitMode[] = ["crop", "contain"];
 const BG_MODES: readonly BgMode[] = ["transparent", "solid", "linear", "radial"];
 const BADGE_MODES: readonly BadgeMode[] = ["none", "dot", "ring"];
 const BADGE_CORNERS: readonly BadgeCorner[] = ["bottomright", "topright", "bottomleft", "topleft"];
-const BACKDROPS: readonly BackdropMode[] = ["checker", "dark", "light", "custom"];
+const BACKDROPS: readonly BackdropMode[] = ["checker", "dark", "light", "custom", "android"];
+const ANDROID_BG: readonly AndroidBgMode[] = ["auto", "color", "image"];
+const ANDROID_ANCHORS: readonly AndroidAnchor[] = ["center", "bottom"];
+const ANDROID_MONO: readonly AndroidMono[] = ["off", "auto", "custom"];
 
 const clampInt = (v: unknown, lo: number, hi: number, dflt: number) =>
   typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : dflt;
@@ -248,6 +295,26 @@ export function validateSettings(raw: unknown): Settings {
     badgeSize: clampInt(s.badgeSize, 8, 35, d.badgeSize),
     sharpen: clampInt(s.sharpen, 0, 100, d.sharpen),
     legacyBmp: typeof s.legacyBmp === "boolean" ? s.legacyBmp : d.legacyBmp,
+    android: validateAndroid(s.android),
+  };
+}
+
+export function validateAndroid(raw: unknown): AndroidSettings {
+  const a = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const d = DEFAULT_ANDROID;
+  const bool = (v: unknown, dflt: boolean) => (typeof v === "boolean" ? v : dflt);
+  return {
+    bgMode: ANDROID_BG.includes(a.bgMode as AndroidBgMode) ? (a.bgMode as AndroidBgMode) : d.bgMode,
+    bgColor: validHex(a.bgColor, d.bgColor),
+    flatten: bool(a.flatten, d.flatten),
+    scale: clampFloat(a.scale, 60, 130, d.scale, 10),
+    anchor: ANDROID_ANCHORS.includes(a.anchor as AndroidAnchor) ? (a.anchor as AndroidAnchor) : d.anchor,
+    offsetX: clampFloat(a.offsetX, -18, 18, d.offsetX, 2),
+    offsetY: clampFloat(a.offsetY, -18, 18, d.offsetY, 2),
+    mono: ANDROID_MONO.includes(a.mono as AndroidMono) ? (a.mono as AndroidMono) : d.mono,
+    monoThreshold: clampInt(a.monoThreshold, 1, 100, d.monoThreshold),
+    stripCorners: bool(a.stripCorners, d.stripCorners),
+    legacy: bool(a.legacy, d.legacy),
   };
 }
 
@@ -274,6 +341,10 @@ export function loadPrefs(): Prefs {
       backdropColor: validHex(raw.backdropColor, DEFAULTS.backdropColor),
       pixelGrid: typeof raw.pixelGrid === "boolean" ? raw.pixelGrid : DEFAULTS.pixelGrid,
       presets,
+      lastProject:
+        typeof raw.lastProject === "string" && raw.lastProject.trim() && raw.lastProject.length < 1024
+          ? raw.lastProject
+          : null,
     };
   } catch {
     return structuredClone(DEFAULTS);

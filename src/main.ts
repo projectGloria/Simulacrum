@@ -1,12 +1,16 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import {
   ALL_SIZES,
+  ANDROID_SCALE_PRESETS,
   BUILTIN_PRESETS,
   loadPrefs,
   savePrefs,
+  type AndroidAnchor,
+  type AndroidBgMode,
+  type AndroidMono,
   type BackdropMode,
   type BadgeCorner,
   type BadgeMode,
@@ -31,6 +35,8 @@ interface Item {
   icoEntries: api.IcoEntryInfo[] | null;
   overriddenSizes: number[];
   customSettings: Settings | null;
+  /** File name of the custom Android monochrome image held by the backend, if any. */
+  androidMonoName: string | null;
 }
 
 const IMAGE_EXT = ["png", "jpg", "jpeg", "webp", "bmp", "svg", "svgz", "tif", "tiff", "gif", "ico"];
@@ -129,6 +135,36 @@ const el = {
   cancelBatch: $<HTMLButtonElement>("cancelBatch"),
   exportIcns: $<HTMLButtonElement>("exportIcns"),
   exportTauri: $<HTMLButtonElement>("exportTauri"),
+  exportAndroid: $<HTMLButtonElement>("exportAndroid"),
+  androidBox: $("androidBox"),
+  androidFull: $<HTMLCanvasElement>("androidFull"),
+  androidShowVisible: $<HTMLInputElement>("androidShowVisible"),
+  androidShowSafe: $<HTMLInputElement>("androidShowSafe"),
+  androidStats: $("androidStats"),
+  androidMonoWrap: $("androidMonoWrap"),
+  androidMono: $<HTMLCanvasElement>("androidMono"),
+  androidMasks: $("androidMasks"),
+  androidWarnings: $<HTMLUListElement>("androidWarnings"),
+  androidGroup: $<HTMLDetailsElement>("androidGroup"),
+  androidBgColorWrap: $("androidBgColorWrap"),
+  androidBgColor: $<HTMLInputElement>("androidBgColor"),
+  androidSample: $<HTMLButtonElement>("androidSample"),
+  androidFlatten: $<HTMLInputElement>("androidFlatten"),
+  androidScale: $<HTMLInputElement>("androidScale"),
+  androidScaleOut: $("androidScaleOut"),
+  androidOffsetX: $<HTMLInputElement>("androidOffsetX"),
+  androidOffsetXOut: $("androidOffsetXOut"),
+  androidOffsetY: $<HTMLInputElement>("androidOffsetY"),
+  androidOffsetYOut: $("androidOffsetYOut"),
+  androidMonoAuto: $("androidMonoAuto"),
+  androidMonoThreshold: $<HTMLInputElement>("androidMonoThreshold"),
+  androidMonoThresholdOut: $("androidMonoThresholdOut"),
+  androidMonoCustom: $("androidMonoCustom"),
+  androidMonoPick: $<HTMLButtonElement>("androidMonoPick"),
+  androidMonoClear: $<HTMLButtonElement>("androidMonoClear"),
+  androidMonoName: $("androidMonoName"),
+  androidStripCorners: $<HTMLInputElement>("androidStripCorners"),
+  androidLegacy: $<HTMLInputElement>("androidLegacy"),
   exportWeb: $<HTMLButtonElement>("exportWeb"),
   applyFolder: $<HTMLButtonElement>("applyFolder"),
 
@@ -177,6 +213,15 @@ async function pump() {
     const item = selected();
     if (!item) break;
     const base = effectiveSettings(item);
+    if (prefs.backdrop === "android") {
+      try {
+        const p = await api.androidPreview(item.id, base);
+        if (item.id === selectedId) showAndroidPreview(p);
+      } catch (e) {
+        if (item.id === selectedId) toast(errMsg(e), "error");
+      }
+      continue;
+    }
     const reqSettings: Settings = comparing
       ? {
           ...base,
@@ -223,6 +268,13 @@ function applyBackdropStyles() {
   });
 
   el.smalls.classList.toggle("show-grid", prefs.pixelGrid);
+
+  const android = prefs.backdrop === "android";
+  el.androidBox.hidden = !android;
+  el.mainBox.hidden = android;
+  el.smalls.hidden = android;
+  el.compareBtn.hidden = android;
+  el.pixelGrid.parentElement!.hidden = android;
 
   const showTaskbar = prefs.backdrop === "dark" || prefs.backdrop === "light";
   el.taskbarStrip.hidden = !showTaskbar;
@@ -347,6 +399,191 @@ function showPreview(frames: api.Frame[], item: Item) {
 window.addEventListener("resize", () => {
   if (!viewsKey.startsWith(`${window.devicePixelRatio || 1}|`)) schedulePreview();
 });
+
+
+// ---- Android adaptive-icon preview ------------------------------------------------------
+
+/** Last analysis for the selected item (drives "Sample edge"). */
+let androidAnalysis: api.AndroidAnalysis | null = null;
+let androidComposite: HTMLCanvasElement | null = null;
+let androidMonoLayer: HTMLCanvasElement | null = null;
+
+type MaskKind = "circle" | "squircle" | "rounded" | "teardrop";
+const ANDROID_MASKS: { kind: MaskKind; label: string }[] = [
+  { kind: "circle", label: "Circle" },
+  { kind: "squircle", label: "Squircle" },
+  { kind: "rounded", label: "Rounded square" },
+  { kind: "teardrop", label: "Teardrop" },
+];
+const ANDROID_MASK_SIZES = [96, 48];
+
+function frameCanvas(f: api.Frame): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = c.height = f.side;
+  paint(c, f);
+  return c;
+}
+
+/** Launcher mask outline over a `d`-sized square at the origin. */
+function maskPath(ctx: CanvasRenderingContext2D, kind: MaskKind, d: number) {
+  ctx.beginPath();
+  const r = d / 2;
+  switch (kind) {
+    case "circle":
+      ctx.arc(r, r, r, 0, Math.PI * 2);
+      break;
+    case "squircle": {
+      // Superellipse |x|^4 + |y|^4 = 1.
+      const steps = 96;
+      for (let i = 0; i <= steps; i++) {
+        const t = (i / steps) * Math.PI * 2;
+        const c = Math.cos(t);
+        const s = Math.sin(t);
+        const x = r + r * Math.sign(c) * Math.abs(c) ** 0.5;
+        const y = r + r * Math.sign(s) * Math.abs(s) ** 0.5;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      break;
+    }
+    case "rounded":
+      ctx.roundRect(0, 0, d, d, d * 0.16);
+      break;
+    case "teardrop":
+      ctx.roundRect(0, 0, d, d, [r, r, d * 0.12, r]);
+      break;
+  }
+  ctx.closePath();
+}
+
+/** Crop the composite to the visible 72 of 108 dp and draw it through a launcher mask. */
+function drawMasked(c: HTMLCanvasElement, kind: MaskKind, cssSide: number) {
+  if (!androidComposite) return;
+  const dpr = window.devicePixelRatio || 1;
+  const d = Math.round(cssSide * dpr);
+  if (c.width !== d) c.width = c.height = d;
+  c.style.width = c.style.height = `${cssSide}px`;
+  const ctx = c.getContext("2d")!;
+  ctx.clearRect(0, 0, d, d);
+  ctx.save();
+  maskPath(ctx, kind, d);
+  ctx.clip();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  const side = androidComposite.width;
+  const inset = side / 6;
+  ctx.drawImage(androidComposite, inset, inset, side - 2 * inset, side - 2 * inset, 0, 0, d, d);
+  ctx.restore();
+}
+
+function drawAndroidFull() {
+  const c = el.androidFull;
+  const ctx = c.getContext("2d")!;
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (!androidComposite) return;
+  const n = c.width;
+  ctx.drawImage(androidComposite, 0, 0, n, n);
+  const inset = n / 6;
+  // Dim the outer 18 dp that no launcher shows.
+  ctx.save();
+  ctx.fillStyle = "rgba(10, 12, 16, 0.55)";
+  ctx.beginPath();
+  ctx.rect(0, 0, n, n);
+  ctx.rect(inset, inset, n - 2 * inset, n - 2 * inset);
+  ctx.fill("evenodd");
+  ctx.restore();
+  if (el.androidShowVisible.checked) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(inset + 0.5, inset + 0.5, n - 2 * inset - 1, n - 2 * inset - 1);
+    ctx.restore();
+  }
+  if (el.androidShowSafe.checked) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(108, 140, 255, 0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(n / 2, n / 2, (n * 33) / 108, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawAndroidMono() {
+  el.androidMonoWrap.hidden = !androidMonoLayer;
+  if (!androidMonoLayer) return;
+  const dpr = window.devicePixelRatio || 1;
+  const d = Math.round(96 * dpr);
+  const c = el.androidMono;
+  if (c.width !== d) c.width = c.height = d;
+  const ctx = c.getContext("2d")!;
+  ctx.clearRect(0, 0, d, d);
+  const side = androidMonoLayer.width;
+  const inset = side / 6;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(androidMonoLayer, inset, inset, side - 2 * inset, side - 2 * inset, 0, 0, d, d);
+  // Themed icons tint the silhouette with a wallpaper-derived color.
+  ctx.globalCompositeOperation = "source-in";
+  ctx.fillStyle = "#c4eed0";
+  ctx.fillRect(0, 0, d, d);
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function buildAndroidMasks() {
+  if (el.androidMasks.childElementCount) return;
+  for (const m of ANDROID_MASKS) {
+    const fig = document.createElement("figure");
+    const pair = document.createElement("div");
+    pair.className = "mask-pair";
+    for (const size of ANDROID_MASK_SIZES) {
+      const c = document.createElement("canvas");
+      c.dataset.kind = m.kind;
+      c.dataset.size = String(size);
+      c.title = `${m.label} · ${size}px`;
+      pair.append(c);
+    }
+    const cap = document.createElement("figcaption");
+    cap.textContent = m.label;
+    fig.append(pair, cap);
+    el.androidMasks.append(fig);
+  }
+}
+
+function showAndroidPreview(p: api.AndroidPreview) {
+  androidAnalysis = p.analysis;
+  androidComposite = frameCanvas(p.composite);
+  androidMonoLayer = p.mono ? frameCanvas(p.mono) : null;
+  buildAndroidMasks();
+  drawAndroidFull();
+  el.androidMasks
+    .querySelectorAll<HTMLCanvasElement>("canvas")
+    .forEach((c) => drawMasked(c, c.dataset.kind as MaskKind, Number(c.dataset.size)));
+  drawAndroidMono();
+
+  const a = p.analysis;
+  const auto = effectiveSettings().android.bgMode === "auto";
+  const bgLine =
+    a.bgMode === "color"
+      ? `Background: color ${a.bgColor.toUpperCase()}${auto ? ` (auto · ${a.edge} edges)` : ""}`
+      : `Background: image${auto ? " (auto · varied edges)" : ""}`;
+  const lines = [
+    bgLine,
+    `Coverage: ${a.coveragePct.toFixed(0)}% of the visible 72 dp`,
+    `Outside the 72 dp circle: ${a.clippedPct.toFixed(1)}%`,
+  ];
+  if (a.cornersDetected) lines.push(a.cornersStripped ? "Rounded source corners stripped" : "Rounded source corners kept");
+  el.androidStats.textContent = lines.join("\n");
+  el.androidWarnings.replaceChildren(
+    ...a.warnings.map((w) => {
+      const li = document.createElement("li");
+      li.textContent = w;
+      return li;
+    }),
+  );
+  el.androidSample.disabled = false;
+}
 
 // ---- rendering --------------------------------------------------------------------------
 
@@ -495,6 +732,7 @@ function renderControls() {
   el.alsoPng.checked = prefs.alsoPng;
   el.alsoPng1024.checked = prefs.alsoPng1024;
   el.legacyBmp.checked = s.legacyBmp;
+  renderAndroidControls(s, sel);
 
   document.querySelectorAll<HTMLInputElement>('input[name="backdrop"]').forEach((r) => (r.checked = r.value === prefs.backdrop));
   el.backdropColor.hidden = prefs.backdrop !== "custom";
@@ -513,8 +751,10 @@ function renderControls() {
   const canSingleAction = !!sel && !batchRunning;
   el.exportIcns.disabled = !canSingleAction;
   el.exportTauri.disabled = !canSingleAction;
+  el.exportAndroid.disabled = !canSingleAction;
   el.exportWeb.disabled = !canSingleAction;
   el.applyFolder.disabled = !canSingleAction;
+  renderProjectButton();
 
   el.empty.hidden = !!sel;
   el.previewArea.hidden = !sel;
@@ -535,6 +775,35 @@ function renderControls() {
     if (sel.warning) parts.push(sel.warning);
     el.meta.textContent = parts.join(" · ");
   }
+}
+
+function renderAndroidControls(s: Settings, sel: Item | null) {
+  const a = s.android;
+  const radio = (name: string, value: string) =>
+    document.querySelectorAll<HTMLInputElement>(`input[name="${name}"]`).forEach((r) => (r.checked = r.value === value));
+  radio("androidBg", a.bgMode);
+  radio("androidAnchor", a.anchor);
+  radio("androidMono", a.mono);
+  el.androidBgColorWrap.hidden = a.bgMode === "image";
+  el.androidBgColor.value = a.bgColor;
+  el.androidSample.disabled = !androidAnalysis;
+  el.androidFlatten.checked = a.flatten;
+  el.androidScale.value = String(a.scale);
+  el.androidScaleOut.textContent = `${Number(a.scale.toFixed(1))}%`;
+  el.androidOffsetX.value = String(a.offsetX);
+  el.androidOffsetXOut.textContent = `${a.offsetX} dp`;
+  el.androidOffsetY.value = String(a.offsetY);
+  el.androidOffsetYOut.textContent = `${a.offsetY} dp`;
+  el.androidMonoAuto.hidden = a.mono !== "auto";
+  el.androidMonoThreshold.value = String(a.monoThreshold);
+  el.androidMonoThresholdOut.textContent = String(a.monoThreshold);
+  el.androidMonoCustom.hidden = a.mono !== "custom";
+  const monoName = sel?.androidMonoName ?? null;
+  el.androidMonoName.textContent = monoName ?? "No image chosen";
+  el.androidMonoClear.hidden = !monoName;
+  el.androidMonoPick.disabled = !sel;
+  el.androidStripCorners.checked = a.stripCorners;
+  el.androidLegacy.checked = a.legacy;
 }
 
 let saveTimer = 0;
@@ -560,6 +829,7 @@ function updateSettings(mutate: (s: Settings) => void) {
 // ---- actions ----------------------------------------------------------------------------
 
 function select(id: number | null) {
+  if (id !== selectedId) androidAnalysis = null;
   selectedId = id;
   renderList();
   renderControls();
@@ -578,6 +848,7 @@ function toItem(r: Extract<api.LoadResult, { status: "ok" }>): Item {
     icoEntries: r.icoEntries,
     overriddenSizes: [],
     customSettings: null,
+    androidMonoName: null,
   };
 }
 
@@ -748,6 +1019,56 @@ async function exportPackSelected(pack: PackKind) {
   }
 }
 
+async function exportAndroidSelected() {
+  const sel = selected();
+  if (!sel) return;
+  try {
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose folder for the Android icon pack (an android folder is created inside)",
+    });
+    const dir = Array.isArray(picked) ? picked[0] : picked;
+    if (!dir) return;
+    const written = await api.exportAndroid(sel.id, dir, effectiveSettings(sel));
+    toast(`Exported ${written.length} files to the android folder in ${dir}`);
+  } catch (e) {
+    toast(`Android export failed: ${errMsg(e)}`, "error");
+  }
+}
+
+async function pickAndroidMono() {
+  const sel = selected();
+  if (!sel) return;
+  try {
+    const picked = await open({
+      multiple: false,
+      title: "Choose a monochrome (themed) icon image",
+      filters: [{ name: "Images", extensions: IMAGE_EXT }],
+    });
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    sel.androidMonoName = await api.setAndroidMono(sel.id, path);
+    renderControls();
+    schedulePreview();
+  } catch (e) {
+    toast(`Could not load monochrome image: ${errMsg(e)}`, "error");
+  }
+}
+
+async function clearAndroidMono() {
+  const sel = selected();
+  if (!sel) return;
+  try {
+    await api.setAndroidMono(sel.id, null);
+    sel.androidMonoName = null;
+    renderControls();
+    schedulePreview();
+  } catch (e) {
+    toast(errMsg(e), "error");
+  }
+}
+
 async function applyToFolderSelected() {
   const sel = selected();
   if (!sel) return;
@@ -897,6 +1218,43 @@ el.badgeSize.addEventListener("input", () => updateSettings((s) => (s.badgeSize 
 el.sharpen.addEventListener("input", () => updateSettings((s) => (s.sharpen = Number(el.sharpen.value))));
 el.legacyBmp.addEventListener("change", () => updateSettings((s) => (s.legacyBmp = el.legacyBmp.checked)));
 
+// Android adaptive icon
+const onRadio = (name: string, fn: (v: string) => void) =>
+  document
+    .querySelectorAll<HTMLInputElement>(`input[name="${name}"]`)
+    .forEach((r) => r.addEventListener("change", () => fn(r.value)));
+onRadio("androidBg", (v) => updateSettings((s) => (s.android.bgMode = v as AndroidBgMode)));
+onRadio("androidAnchor", (v) => updateSettings((s) => (s.android.anchor = v as AndroidAnchor)));
+onRadio("androidMono", (v) => updateSettings((s) => (s.android.mono = v as AndroidMono)));
+el.androidBgColor.addEventListener("input", () => updateSettings((s) => (s.android.bgColor = el.androidBgColor.value)));
+el.androidSample.onclick = () => {
+  const a = androidAnalysis;
+  if (!a) return;
+  updateSettings((s) => {
+    s.android.bgColor = a.sampledColor.toLowerCase();
+    s.android.bgMode = "color";
+  });
+};
+el.androidFlatten.addEventListener("change", () => updateSettings((s) => (s.android.flatten = el.androidFlatten.checked)));
+el.androidScale.addEventListener("input", () => updateSettings((s) => (s.android.scale = Number(el.androidScale.value))));
+document.querySelectorAll<HTMLButtonElement>("[data-android-scale]").forEach((b) => {
+  const key = b.dataset.androidScale as keyof typeof ANDROID_SCALE_PRESETS;
+  b.onclick = () => updateSettings((s) => (s.android.scale = ANDROID_SCALE_PRESETS[key]));
+});
+el.androidOffsetX.addEventListener("input", () => updateSettings((s) => (s.android.offsetX = Number(el.androidOffsetX.value))));
+el.androidOffsetY.addEventListener("input", () => updateSettings((s) => (s.android.offsetY = Number(el.androidOffsetY.value))));
+el.androidMonoThreshold.addEventListener("input", () =>
+  updateSettings((s) => (s.android.monoThreshold = Number(el.androidMonoThreshold.value))),
+);
+el.androidMonoPick.onclick = () => void pickAndroidMono();
+el.androidMonoClear.onclick = () => void clearAndroidMono();
+el.androidStripCorners.addEventListener("change", () =>
+  updateSettings((s) => (s.android.stripCorners = el.androidStripCorners.checked)),
+);
+el.androidLegacy.addEventListener("change", () => updateSettings((s) => (s.android.legacy = el.androidLegacy.checked)));
+el.androidShowVisible.addEventListener("change", drawAndroidFull);
+el.androidShowSafe.addEventListener("change", drawAndroidFull);
+
 el.alsoPng.addEventListener("change", () => {
   prefs.alsoPng = el.alsoPng.checked;
   savePrefs(prefs);
@@ -910,6 +1268,7 @@ el.alsoPng1024.addEventListener("change", () => {
 document.querySelectorAll<HTMLInputElement>('input[name="backdrop"]').forEach((r) =>
   r.addEventListener("change", () => {
     prefs.backdrop = r.value as BackdropMode;
+    if (prefs.backdrop === "android") el.androidGroup.open = true;
     savePrefs(prefs);
     renderControls();
     schedulePreview();
@@ -1054,6 +1413,7 @@ el.exportAll.onclick = () => void exportAll();
 el.cancelBatch.onclick = () => void api.cancelBatch();
 el.exportIcns.onclick = () => void exportIcnsSelected();
 el.exportTauri.onclick = () => void exportPackSelected("tauri");
+el.exportAndroid.onclick = () => void exportAndroidSelected();
 el.exportWeb.onclick = () => void exportPackSelected("web");
 el.applyFolder.onclick = () => void applyToFolderSelected();
 el.clear.onclick = () => {
@@ -1124,6 +1484,220 @@ async function syncMaxGlyph() {
 }
 void win.onResized(() => void syncMaxGlyph());
 void syncMaxGlyph();
+
+// ---- Directory reader -------------------------------------------------------------------
+
+const pj = {
+  open: $<HTMLButtonElement>("projectOpen"),
+  body: $("projectBody"),
+  name: $("projectName"),
+  path: $("projectPath"),
+  headline: $("projectHeadline"),
+  chips: $("projectChips"),
+  targets: $<HTMLUListElement>("projectTargets"),
+  notes: $<HTMLUListElement>("projectNotes"),
+  rescan: $<HTMLButtonElement>("projectRescan"),
+  close: $<HTMLButtonElement>("projectClose"),
+  export: $<HTMLButtonElement>("exportProject"),
+};
+let project: api.ProjectReport | null = null;
+/** Ticked target ids. Survives rescans for targets that are still there. */
+let projectSel = new Set<string>();
+let projectBusy = false;
+
+const article = (word: string) => (/^[aeiou]/i.test(word) || /^(x|\.n)/i.test(word) ? "an" : "a");
+
+function describeTarget(t: api.ProjectTarget): string {
+  const f = t.format;
+  const base =
+    f.type === "ico"
+      ? f.favicon
+        ? "ICO 16–48"
+        : "ICO"
+      : f.type === "png"
+        ? `PNG ${f.side} px`
+        : f.type === "icns"
+          ? "ICNS"
+          : f.type === "androidRes"
+            ? `adaptive · ${f.base}`
+            : f.type === "appIconSet"
+              ? "icon set"
+              : "manifest";
+  if (t.profile === "fullBleedOpaque") return `${base} · opaque`;
+  if (t.profile === "maskable") return `${base} · maskable`;
+  return base;
+}
+
+function renderProject() {
+  pj.body.hidden = !project;
+  if (!project) {
+    renderProjectButton();
+    return;
+  }
+  const p = project;
+  pj.name.textContent = p.name;
+  pj.path.textContent = p.root;
+  pj.path.title = p.root;
+  const label = p.primaryLabel;
+  pj.headline.textContent = !label
+    ? "No known project type found."
+    : p.primary === "repoIcon"
+      ? "This folder has a repository icon."
+      : `This is ${article(label)} ${label} project.`;
+  pj.chips.replaceChildren(
+    ...p.detections.slice(1).map((d) => {
+      const c = document.createElement("span");
+      c.className = "chip";
+      c.textContent = d.label;
+      c.title = d.evidence.join("\n");
+      return c;
+    }),
+  );
+  pj.chips.hidden = p.detections.length < 2;
+
+  pj.targets.replaceChildren();
+  for (const d of p.detections) {
+    if (!d.targets.length) continue;
+    const head = document.createElement("li");
+    head.className = "pt-group";
+    head.textContent = d.label;
+    head.title = d.evidence.join("\n");
+    pj.targets.append(head);
+    for (const t of d.targets) {
+      const li = document.createElement("li");
+      const lab = document.createElement("label");
+      lab.className = "pt-row";
+      lab.title = `${t.label}\n${t.relPath}`;
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = projectSel.has(t.id);
+      cb.onchange = () => {
+        if (cb.checked) projectSel.add(t.id);
+        else projectSel.delete(t.id);
+        renderProjectButton();
+      };
+      const text = document.createElement("span");
+      text.className = "pt-text";
+      const path = document.createElement("span");
+      path.className = "pt-path";
+      path.textContent = t.relPath;
+      const meta = document.createElement("span");
+      meta.className = "pt-meta muted";
+      meta.textContent = describeTarget(t);
+      text.append(path, meta);
+      const tag = document.createElement("span");
+      tag.className = `pt-tag ${t.exists ? "replace" : "new"}`;
+      tag.textContent = t.exists ? "replace" : "new";
+      lab.append(cb, text, tag);
+      li.append(lab);
+      pj.targets.append(li);
+    }
+  }
+  const notes = [...p.warnings, ...p.detections.flatMap((d) => d.notes)];
+  pj.notes.replaceChildren(
+    ...notes.map((n) => {
+      const li = document.createElement("li");
+      li.textContent = n;
+      return li;
+    }),
+  );
+  pj.notes.hidden = !notes.length;
+  renderProjectButton();
+}
+
+function renderProjectButton() {
+  pj.export.hidden = !project;
+  el.exportOne.classList.toggle("primary", !project && items.length <= 1);
+  if (!project) return;
+  const n = project.detections.flatMap((d) => d.targets).filter((t) => projectSel.has(t.id)).length;
+  pj.export.textContent = `Export to ${project.name}${n ? ` (${n})` : ""}…`;
+  pj.export.disabled = !selected() || batchRunning || projectBusy || n === 0;
+}
+
+/** Scan `root`. `fresh` resets the ticks to each target's default and applies the project's look. */
+async function loadProject(root: string, fresh: boolean, quiet = false) {
+  try {
+    const report = await api.scanProject(root);
+    const ids = new Set(report.detections.flatMap((d) => d.targets.map((t) => t.id)));
+    if (fresh || !project || project.root !== report.root) {
+      projectSel = new Set(report.detections.flatMap((d) => d.targets.filter((t) => t.defaultOn).map((t) => t.id)));
+    } else {
+      projectSel = new Set([...projectSel].filter((id) => ids.has(id)));
+    }
+    project = report;
+    prefs.lastProject = report.root;
+    savePrefs(prefs);
+    if (fresh && (report.primary === "android" || report.primary === "flutter")) {
+      prefs.backdrop = "android";
+      el.androidGroup.open = true;
+      renderControls();
+      schedulePreview();
+    }
+    renderProject();
+  } catch (e) {
+    if (quiet) {
+      prefs.lastProject = null;
+      savePrefs(prefs);
+    } else {
+      toast(`Could not read the folder: ${errMsg(e)}`, "error");
+    }
+  }
+}
+
+async function openProject() {
+  try {
+    const picked = await open({ directory: true, multiple: false, title: "Open a project folder" });
+    const dir = Array.isArray(picked) ? picked[0] : picked;
+    if (dir) await loadProject(dir, true);
+  } catch (e) {
+    toast(errMsg(e), "error");
+  }
+}
+
+async function exportProject() {
+  const sel = selected();
+  const p = project;
+  if (!sel || !p) return;
+  const chosen = p.detections.flatMap((d) => d.targets).filter((t) => projectSel.has(t.id));
+  if (!chosen.length) return;
+  const replacing = chosen.filter((t) => t.exists).length;
+  const msg =
+    `Write ${chosen.length} icon target${chosen.length === 1 ? "" : "s"} into ${p.name}?\n\n` +
+    (replacing
+      ? `${replacing} existing ${replacing === 1 ? "one is" : "ones are"} replaced. The originals are copied to a backup folder first.`
+      : "Nothing existing is replaced.");
+  if (!(await ask(msg, { title: "Export to project", kind: "info", okLabel: "Export", cancelLabel: "Cancel" }))) return;
+  projectBusy = true;
+  renderProjectButton();
+  try {
+    const out = await api.exportToProject(sel.id, p.root, chosen.map((t) => t.id), effectiveSettings(sel));
+    let line = `Wrote ${out.written.length} files into ${p.name}`;
+    if (out.replaced) line += ` (${out.replaced} replaced)`;
+    if (out.removed.length) line += `, removed ${out.removed.length} duplicate resource${out.removed.length === 1 ? "" : "s"}`;
+    if (out.backupDir) line += `. Originals backed up to ${out.backupDir}`;
+    toast(line);
+    for (const w of out.warnings) toast(w, "error");
+  } catch (e) {
+    toast(`Project export failed: ${errMsg(e)}`, "error");
+  } finally {
+    projectBusy = false;
+    await loadProject(p.root, false);
+  }
+}
+
+pj.open.onclick = () => void openProject();
+pj.rescan.onclick = () => {
+  if (project) void loadProject(project.root, false);
+};
+pj.close.onclick = () => {
+  project = null;
+  projectSel.clear();
+  prefs.lastProject = null;
+  savePrefs(prefs);
+  renderProject();
+};
+pj.export.onclick = () => void exportProject();
+if (prefs.lastProject) void loadProject(prefs.lastProject, false, true);
 
 renderList();
 renderControls();

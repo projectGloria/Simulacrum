@@ -147,6 +147,9 @@ pub struct Settings {
     // Output tuning
     pub sharpen: f32,
     pub legacy_bmp: bool,
+
+    /// Android adaptive-icon pack options (saved with presets).
+    pub android: crate::android::AndroidSettings,
 }
 
 impl Default for Settings {
@@ -180,11 +183,12 @@ impl Default for Settings {
             badge_size: 20.0,
             sharpen: 0.0,
             legacy_bmp: false,
+            android: crate::android::AndroidSettings::default(),
         }
     }
 }
 
-fn normalize_hex(raw: &str, fallback: &str) -> String {
+pub(crate) fn normalize_hex(raw: &str, fallback: &str) -> String {
     let s = raw.trim().trim_start_matches('#');
     if s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
         format!("#{}", s.to_ascii_lowercase())
@@ -193,7 +197,7 @@ fn normalize_hex(raw: &str, fallback: &str) -> String {
     }
 }
 
-fn parse_hex_rgb(hex: &str) -> [f32; 3] {
+pub(crate) fn parse_hex_rgb(hex: &str) -> [f32; 3] {
     let s = hex.trim().trim_start_matches('#');
     if s.len() == 6 {
         if let (Ok(r), Ok(g), Ok(b)) = (
@@ -225,6 +229,10 @@ impl Settings {
             self.shadow_offset_y,
             self.badge_size,
             self.sharpen,
+            self.android.scale,
+            self.android.offset_x,
+            self.android.offset_y,
+            self.android.mono_threshold,
         ];
         if nums.iter().any(|v| !v.is_finite()) {
             return Err(AppError::InvalidSettings("numeric settings must be finite numbers".into()));
@@ -269,6 +277,7 @@ impl Settings {
             badge_size: self.badge_size.clamp(8.0, 35.0),
             sharpen: self.sharpen.clamp(0.0, 100.0),
             legacy_bmp: self.legacy_bmp,
+            android: self.android.validated(),
         })
     }
 
@@ -508,7 +517,7 @@ pub struct Master {
     overrides: HashMap<u32, RgbaImage>,
 }
 
-fn transform_raw(raw: &RgbaImage, rotation: u16, flip_h: bool, flip_v: bool) -> RgbaImage {
+pub(crate) fn transform_raw(raw: &RgbaImage, rotation: u16, flip_h: bool, flip_v: bool) -> RgbaImage {
     let mut out = match rotation {
         90 => imageops::rotate90(raw),
         180 => imageops::rotate180(raw),
@@ -559,6 +568,48 @@ fn render_svg_framed(
         dst[3] = src.alpha() as f32 / 255.0;
     }
     Some(fimg)
+}
+
+/// Frame the artwork into an `inner`×`inner` premultiplied square using the fit mode, zoom, pan,
+/// rotation and flips from `s` (shape, padding and styling are ignored). `strip_inset` crops that
+/// fraction off each side of the centred square first — used to cut away baked-in rounded corners.
+pub(crate) fn frame_art(source: &Source, s: &Settings, inner: u32, strip_inset: f32) -> Rgba32FImage {
+    let inner = inner.max(1);
+    let inner_f = inner as f32;
+    let pan_dx = (s.pan_x / 100.0) * inner_f * 0.5 * s.zoom.max(1.0);
+    let pan_dy = (s.pan_y / 100.0) * inner_f * 0.5 * s.zoom.max(1.0);
+    let strip = strip_inset.clamp(0.0, 0.45);
+
+    if strip <= 1e-6 {
+        if let Some(svg_bytes) = source.svg_bytes.as_deref() {
+            return render_svg_framed(svg_bytes, inner, s, pan_dx, pan_dy)
+                .unwrap_or_else(|| resize_premul(&to_premul(&source.img), inner));
+        }
+    }
+    let mut oriented = transform_raw(&source.raw, s.rotation, s.flip_h, s.flip_v);
+    if strip > 1e-6 {
+        let (w, h) = oriented.dimensions();
+        let m = w.min(h);
+        let cut = ((m as f32) * strip).round() as u32;
+        let side = m.saturating_sub(2 * cut).max(1);
+        let (x0, y0) = ((w - m) / 2 + cut, (h - m) / 2 + cut);
+        oriented = imageops::crop_imm(&oriented, x0, y0, side, side).to_image();
+    }
+    let (ow, oh) = (oriented.width() as f32, oriented.height() as f32);
+    let base = match s.fit_mode {
+        FitMode::Crop => inner_f / ow.min(oh),
+        FitMode::Contain => inner_f / ow.max(oh),
+    };
+    let scale = base * s.zoom;
+    let scaled_w = ow * scale;
+    let scaled_h = oh * scale;
+    let dst_x0 = inner_f * 0.5 + pan_dx - scaled_w * 0.5;
+    let dst_y0 = inner_f * 0.5 + pan_dy - scaled_h * 0.5;
+    let clamp_edges = dst_x0 <= 0.0
+        && dst_y0 <= 0.0
+        && (dst_x0 + scaled_w) >= inner_f
+        && (dst_y0 + scaled_h) >= inner_f;
+    resample::resize_mapped(&to_premul(&oriented), inner, inner, dst_x0, dst_y0, scale, clamp_edges)
 }
 
 fn eval_backdrop(s: &Settings, u: f32, v: f32, c1: [f32; 3], c2: [f32; 3]) -> [f32; 3] {
@@ -706,31 +757,7 @@ pub fn compose_with_overrides(
         .round()
         .clamp(1.0, shape_side as f32) as u32;
     let art_off = shape_off + (shape_side - inner) / 2;
-    let inner_f = inner as f32;
-    let pan_dx = (s.pan_x / 100.0) * inner_f * 0.5 * s.zoom.max(1.0);
-    let pan_dy = (s.pan_y / 100.0) * inner_f * 0.5 * s.zoom.max(1.0);
-
-    let art = if let Some(svg_bytes) = source.svg_bytes.as_deref() {
-        render_svg_framed(svg_bytes, inner, s, pan_dx, pan_dy)
-            .unwrap_or_else(|| resize_premul(&to_premul(&source.img), inner))
-    } else {
-        let oriented = transform_raw(&source.raw, s.rotation, s.flip_h, s.flip_v);
-        let (ow, oh) = (oriented.width() as f32, oriented.height() as f32);
-        let base = match s.fit_mode {
-            FitMode::Crop => inner_f / ow.min(oh),
-            FitMode::Contain => inner_f / ow.max(oh),
-        };
-        let scale = base * s.zoom;
-        let scaled_w = ow * scale;
-        let scaled_h = oh * scale;
-        let dst_x0 = inner_f * 0.5 + pan_dx - scaled_w * 0.5;
-        let dst_y0 = inner_f * 0.5 + pan_dy - scaled_h * 0.5;
-        let clamp_edges = dst_x0 <= 0.0
-            && dst_y0 <= 0.0
-            && (dst_x0 + scaled_w) >= inner_f
-            && (dst_y0 + scaled_h) >= inner_f;
-        resample::resize_mapped(&to_premul(&oriented), inner, inner, dst_x0, dst_y0, scale, clamp_edges)
-    };
+    let art = frame_art(source, s, inner, 0.0);
 
     let mut canvas = Rgba32FImage::new(n, n);
     imageops::replace(&mut canvas, &art, art_off as i64, art_off as i64);
@@ -891,7 +918,7 @@ pub fn build_ico(master: &Master, sizes: &[u32]) -> AppResult<Vec<u8>> {
     build_ico_with_options(master, sizes, false)
 }
 
-fn write_atomic_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
+pub(crate) fn write_atomic_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let tmp = path.with_extension("simulacrum-tmp");
     std::fs::write(&tmp, bytes).map_err(|e| AppError::write(path, e))?;
     std::fs::rename(&tmp, path).map_err(|e| {
@@ -955,7 +982,7 @@ pub fn export_pack(master: &Master, out_dir: &Path, pack: PackKind) -> AppResult
 // edge pixels → dark halos around the rounded corners. Premultiplying first weights each
 // sample's colour by its opacity, so transparent pixels contribute nothing.
 
-fn to_premul(img: &RgbaImage) -> Rgba32FImage {
+pub(crate) fn to_premul(img: &RgbaImage) -> Rgba32FImage {
     let (w, h) = img.dimensions();
     Rgba32FImage::from_fn(w, h, |x, y| {
         let [r, g, b, a] = img.get_pixel(x, y).0.map(|v| v as f32 / 255.0);
@@ -963,7 +990,7 @@ fn to_premul(img: &RgbaImage) -> Rgba32FImage {
     })
 }
 
-fn from_premul(img: &Rgba32FImage) -> RgbaImage {
+pub(crate) fn from_premul(img: &Rgba32FImage) -> RgbaImage {
     let (w, h) = img.dimensions();
     RgbaImage::from_fn(w, h, |x, y| {
         let [r, g, b, a] = img.get_pixel(x, y).0;
@@ -980,7 +1007,7 @@ fn from_premul(img: &Rgba32FImage) -> RgbaImage {
 
 /// Single entry point for every resample in the pipeline. `resample::resize` doesn't clamp,
 /// so Lanczos overshoot survives intact until `from_premul` divides by the unclamped alpha.
-fn resize_premul(img: &Rgba32FImage, side: u32) -> Rgba32FImage {
+pub(crate) fn resize_premul(img: &Rgba32FImage, side: u32) -> Rgba32FImage {
     resample::resize(img, side, side)
 }
 

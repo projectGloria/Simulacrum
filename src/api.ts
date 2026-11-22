@@ -1,7 +1,7 @@
 // Typed wrappers over the Rust commands. Argument keys are camelCase; Tauri maps them to the
 // snake_case Rust parameters (alsoPng → also_png).
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { PackKind, Settings } from "./settings";
+import type { AndroidBgMode, PackKind, Settings } from "./settings";
 
 export interface IcoEntryInfo {
   width: number;
@@ -86,6 +86,57 @@ export const exportPack = (id: number, outDir: string, pack: PackKind, settings:
 export const applyFolderIcon = (id: number, folder: string, settings: Settings) =>
   invoke<string>("apply_folder_icon", { id, folder, settings });
 
+/** Resolved Android adaptive-icon plan, mirrored from Rust `android::Analysis`. */
+export interface AndroidAnalysis {
+  bgMode: Exclude<AndroidBgMode, "auto">;
+  bgColor: string;
+  edge: "transparent" | "flat" | "varied";
+  sampledColor: string;
+  clippedPct: number;
+  coveragePct: number;
+  subjectBboxDp: [number, number, number, number] | null;
+  cornersDetected: boolean;
+  cornersStripped: boolean;
+  mono: boolean;
+  warnings: string[];
+}
+
+export interface AndroidPreview {
+  analysis: AndroidAnalysis;
+  /** Opaque full 108 dp composite (foreground over background). */
+  composite: Frame;
+  mono: Frame | null;
+}
+
+export async function androidPreview(id: number, settings: Settings): Promise<AndroidPreview> {
+  const buf = await invoke<ArrayBuffer>("android_preview", { id, settings });
+  const dv = new DataView(buf);
+  let off = 0;
+  const jsonLen = dv.getUint32(off, true);
+  off += 4;
+  const analysis = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, off, jsonLen))) as AndroidAnalysis;
+  off += jsonLen;
+  const readFrame = (): Frame | null => {
+    const side = dv.getUint32(off, true);
+    off += 4;
+    if (side === 0) return null;
+    const len = side * side * 4;
+    const data = new Uint8ClampedArray(buf, off, len);
+    off += len;
+    return { side, data };
+  };
+  const composite = readFrame();
+  if (!composite) throw new Error("empty Android preview");
+  return { analysis, composite, mono: readFrame() };
+}
+
+/** Pick (or clear, with `null`) the custom monochrome image; returns its file name. */
+export const setAndroidMono = (id: number, path: string | null) =>
+  invoke<string | null>("set_android_mono", { id, path });
+
+export const exportAndroid = (id: number, outDir: string, settings: Settings) =>
+  invoke<string[]>("export_android", { id, outDir, settings });
+
 export const cancelBatch = () => invoke<void>("cancel_batch");
 
 export function exportBatch(
@@ -114,3 +165,69 @@ export function exportBatch(
     }).catch(reject);
   });
 }
+
+// ---- Directory reader ----
+
+export type ProjectKind =
+  | "flutter"
+  | "android"
+  | "tauri"
+  | "electron"
+  | "browserExtension"
+  | "vsCode"
+  | "xcode"
+  | "rustWindows"
+  | "dotNet"
+  | "pyInstaller"
+  | "web"
+  | "repoIcon";
+
+export type TargetFormat =
+  | { type: "ico"; favicon: boolean }
+  | { type: "png"; side: number }
+  | { type: "icns" }
+  | { type: "androidRes"; base: string; round: string | null }
+  | { type: "appIconSet" }
+  | { type: "webManifest" };
+
+export type TargetProfile = "asIs" | "fullBleedOpaque" | "maskable" | "android";
+
+export interface ProjectTarget {
+  id: string;
+  label: string;
+  relPath: string;
+  format: TargetFormat;
+  profile: TargetProfile;
+  exists: boolean;
+  defaultOn: boolean;
+}
+
+export interface ProjectDetection {
+  kind: ProjectKind;
+  label: string;
+  evidence: string[];
+  targets: ProjectTarget[];
+  notes: string[];
+}
+
+export interface ProjectReport {
+  root: string;
+  name: string;
+  primary: ProjectKind | null;
+  primaryLabel: string | null;
+  detections: ProjectDetection[];
+  warnings: string[];
+}
+
+export interface ProjectExportOutcome {
+  written: string[];
+  replaced: number;
+  removed: string[];
+  backupDir: string | null;
+  warnings: string[];
+}
+
+export const scanProject = (path: string) => invoke<ProjectReport>("scan_project", { path });
+
+export const exportToProject = (id: number, root: string, targetIds: string[], settings: Settings) =>
+  invoke<ProjectExportOutcome>("export_to_project", { id, root, targetIds, settings });

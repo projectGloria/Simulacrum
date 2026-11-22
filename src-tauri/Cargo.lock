@@ -3097,6 +3097,7 @@ dependencies = [
  "base64 0.22.1",
  "image",
  "resvg",
+ "roxmltree 0.21.2",
  "serde",
  "serde_json",
  "tauri",

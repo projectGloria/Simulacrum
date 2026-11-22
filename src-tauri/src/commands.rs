@@ -25,6 +25,8 @@ struct Item {
     source: Arc<Source>,
     stem: String,
     overrides: HashMap<u32, RgbaImage>,
+    /// Custom Android monochrome layer artwork, if the user picked one.
+    android_mono: Option<Arc<Source>>,
 }
 
 #[derive(Default)]
@@ -45,6 +47,14 @@ impl AppState {
         items
             .get(&id)
             .map(|i| (i.source.clone(), i.stem.clone(), i.overrides.clone()))
+            .ok_or(AppError::UnknownItem)
+    }
+
+    fn get_android(&self, id: u32) -> AppResult<(Arc<Source>, Option<Arc<Source>>)> {
+        let items = self.items.lock().map_err(|_| AppError::Internal("state lock poisoned".into()))?;
+        items
+            .get(&id)
+            .map(|i| (i.source.clone(), i.android_mono.clone()))
             .ok_or(AppError::UnknownItem)
     }
 }
@@ -144,7 +154,7 @@ fn register_source(state: &AppState, name: String, stem: String, source: Source,
         .items
         .lock()
         .map_err(|_| AppError::Internal("state lock poisoned".into()))?
-        .insert(id, Item { source: Arc::new(source), stem, overrides: HashMap::new() });
+        .insert(id, Item { source: Arc::new(source), stem, overrides: HashMap::new(), android_mono: None });
     Ok(r)
 }
 
@@ -364,6 +374,92 @@ pub async fn export_pack(
     blocking(move || {
         let master = pipeline::compose_with_overrides(&source, &s, Some(&overrides));
         pipeline::export_pack(&master, &dir, pack)
+    })
+    .await
+}
+
+// ---- Android adaptive icons ------------------------------------------------------------
+
+/// Set (or with `None`, clear) the custom monochrome artwork for item `id`. Returns the file name.
+#[tauri::command]
+pub async fn set_android_mono(
+    state: State<'_, Shared>,
+    id: u32,
+    path: Option<String>,
+) -> AppResult<Option<String>> {
+    let state = state.inner().clone();
+    blocking(move || {
+        let (src, name) = match path {
+            Some(p) => {
+                let p = PathBuf::from(p);
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+                (Some(Arc::new(pipeline::load(&p)?)), name)
+            }
+            None => (None, None),
+        };
+        let mut items =
+            state.items.lock().map_err(|_| AppError::Internal("state lock poisoned".into()))?;
+        items.get_mut(&id).ok_or(AppError::UnknownItem)?.android_mono = src;
+        Ok(name)
+    })
+    .await
+}
+
+/// Binary payload, see `android::preview_payload`.
+#[tauri::command]
+pub async fn android_preview(state: State<'_, Shared>, id: u32, settings: Settings) -> AppResult<Response> {
+    let s = settings.validated()?;
+    let (source, mono) = state.get_android(id)?;
+    blocking(move || Ok(Response::new(crate::android::preview_payload(&source, &s, mono.as_deref())?))).await
+}
+
+#[tauri::command]
+pub async fn export_android(
+    state: State<'_, Shared>,
+    id: u32,
+    out_dir: String,
+    settings: Settings,
+) -> AppResult<Vec<String>> {
+    let s = settings.validated()?;
+    let (source, mono) = state.get_android(id)?;
+    let dir = PathBuf::from(&out_dir);
+    blocking(move || crate::android::export(&source, &s, mono.as_deref(), &dir)).await
+}
+
+/// Directory reader: what kind of project `path` is and where its icons live.
+#[tauri::command]
+pub async fn scan_project(path: String) -> AppResult<crate::project::ProjectReport> {
+    blocking(move || crate::project::scan(Path::new(&path))).await
+}
+
+/// Write the chosen targets into the project. Originals go to
+/// `<app local data>/backups/<project>-<unix time>/`.
+#[tauri::command]
+pub async fn export_to_project(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    id: u32,
+    root: String,
+    target_ids: Vec<String>,
+    settings: Settings,
+) -> AppResult<crate::project::ExportOutcome> {
+    use tauri::Manager;
+    let s = settings.validated()?;
+    let (source, _, overrides) = state.get(id)?;
+    let (_, mono) = state.get_android(id)?;
+    let data = app.path().app_local_data_dir().map_err(|e| AppError::Internal(format!("no app data folder: {e}")))?;
+    let root = PathBuf::from(root);
+    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let backup = data.join("backups").join(format!("{name}-{stamp}"));
+    blocking(move || {
+        let input = crate::project::ExportInput {
+            source: &source,
+            settings: &s,
+            overrides: Some(&overrides),
+            mono: mono.as_deref(),
+        };
+        crate::project::export(&root, &target_ids, &input, &backup)
     })
     .await
 }

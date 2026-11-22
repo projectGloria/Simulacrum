@@ -19,6 +19,23 @@
     </header>
     <div class="app">
       <aside class="sidebar">
+        <section id="project" class="project" aria-label="Directory reader">
+          <div class="project-head">
+            <h2>Directory reader</h2>
+            <button id="projectOpen" class="btn small" type="button" title="Pick a project folder; Simulacrum works out where its icons go">Open project…</button>
+          </div>
+          <div id="projectBody" hidden>
+            <div class="project-title"><strong id="projectName"></strong><span id="projectPath" class="muted"></span></div>
+            <p id="projectHeadline" class="project-headline"></p>
+            <div id="projectChips" class="chips"></div>
+            <ul id="projectTargets" class="project-targets"></ul>
+            <ul id="projectNotes" class="project-notes"></ul>
+            <div class="project-foot">
+              <button id="projectRescan" class="btn small ghost" type="button">Rescan</button>
+              <button id="projectClose" class="btn small ghost" type="button">Close</button>
+            </div>
+          </div>
+        </section>
         <div id="drop" class="drop">
           <p>Drop images or paste (Ctrl+V)</p>
           <p class="muted fmt-hint">PNG · JPG · WEBP · BMP · SVG · TIFF · GIF · ICO</p>
@@ -43,6 +60,7 @@
               <label><input type="radio" name="backdrop" value="dark" /><span>Win11 Dark</span></label>
               <label><input type="radio" name="backdrop" value="light" /><span>Win11 Light</span></label>
               <label><input type="radio" name="backdrop" value="custom" /><span>Color</span></label>
+              <label><input type="radio" name="backdrop" value="android" /><span>Android</span></label>
             </div>
             <input id="backdropColor" type="color" class="color-dot" title="Custom backdrop color" hidden />
             <label class="pill-toggle" title="Show 1px grid on zoomed icons">
@@ -60,6 +78,25 @@
           <div id="taskbarStrip" class="taskbar-strip" hidden>
             <span class="tb-mock-label muted">Taskbar context</span>
             <div class="tb-mock-bar" id="taskbarMock"></div>
+          </div>
+
+          <div id="androidBox" class="android-box" hidden>
+            <div class="android-main">
+              <div class="android-canvas-wrap" title="Full 108 dp layer · dashed square = visible 72 dp · circle = 66 dp safe zone">
+                <canvas id="androidFull" width="288" height="288" aria-label="Android adaptive layers"></canvas>
+              </div>
+              <div class="android-side">
+                <label class="check"><input id="androidShowVisible" type="checkbox" checked /> 72 dp visible area</label>
+                <label class="check"><input id="androidShowSafe" type="checkbox" checked /> 66 dp safe circle</label>
+                <p id="androidStats" class="muted android-stats"></p>
+                <div id="androidMonoWrap" class="android-mono" hidden>
+                  <div class="field-label">Themed (monochrome)</div>
+                  <canvas id="androidMono" width="96" height="96" aria-label="Monochrome layer"></canvas>
+                </div>
+              </div>
+            </div>
+            <div id="androidMasks" class="android-masks"></div>
+            <ul id="androidWarnings" class="android-warnings"></ul>
           </div>
 
           <div id="smalls" class="smalls"></div>
@@ -203,6 +240,75 @@
           </div>
         </details>
 
+        <details class="group" id="androidGroup">
+          <summary>Android Adaptive Icon</summary>
+          <div class="group-body">
+            <div class="field-label">Background layer</div>
+            <div class="seg compact" role="radiogroup">
+              <label><input type="radio" name="androidBg" value="auto" /><span>Auto</span></label>
+              <label><input type="radio" name="androidBg" value="color" /><span>Color</span></label>
+              <label><input type="radio" name="androidBg" value="image" /><span>Image</span></label>
+            </div>
+            <div class="color-row mt-sm">
+              <label id="androidBgColorWrap">Color <input id="androidBgColor" type="color" /></label>
+              <button id="androidSample" class="btn small ghost" type="button" title="Use the color sampled from the image edges">Sample edge</button>
+            </div>
+            <label class="check mt-sm" title="Bake the background into the foreground PNGs too">
+              <input id="androidFlatten" type="checkbox" /> Flatten foreground onto background
+            </label>
+
+            <div class="slider-row mt-sm">
+              <label for="androidScale">Scale <output id="androidScaleOut"></output></label>
+              <input id="androidScale" type="range" min="60" max="130" step="0.1" />
+            </div>
+            <div class="btn-row">
+              <button class="btn small" type="button" data-android-scale="fullBleed" title="110% — overfill so masks never show an edge">Full bleed</button>
+              <button class="btn small" type="button" data-android-scale="fitVisible" title="100% — art fills the visible 72 dp">Fit visible</button>
+              <button class="btn small" type="button" data-android-scale="safeZone" title="≈91.7% — art fits the 66 dp safe zone">Safe zone</button>
+            </div>
+            <div class="mt-sm">
+              <div class="field-label">Anchor</div>
+              <div class="seg compact" role="radiogroup">
+                <label><input type="radio" name="androidAnchor" value="center" /><span>Center</span></label>
+                <label><input type="radio" name="androidAnchor" value="bottom" /><span>Bottom</span></label>
+              </div>
+            </div>
+            <div class="slider-row">
+              <label for="androidOffsetX">Offset X <output id="androidOffsetXOut"></output></label>
+              <input id="androidOffsetX" type="range" min="-18" max="18" step="0.5" />
+            </div>
+            <div class="slider-row">
+              <label for="androidOffsetY">Offset Y <output id="androidOffsetYOut"></output></label>
+              <input id="androidOffsetY" type="range" min="-18" max="18" step="0.5" />
+            </div>
+
+            <div class="mt-sm">
+              <div class="field-label">Monochrome (themed icon)</div>
+              <div class="seg compact" role="radiogroup">
+                <label><input type="radio" name="androidMono" value="off" /><span>Off</span></label>
+                <label><input type="radio" name="androidMono" value="auto" /><span>Auto</span></label>
+                <label><input type="radio" name="androidMono" value="custom" /><span>Custom</span></label>
+              </div>
+            </div>
+            <div id="androidMonoAuto" class="slider-row" hidden>
+              <label for="androidMonoThreshold">Silhouette threshold <output id="androidMonoThresholdOut"></output></label>
+              <input id="androidMonoThreshold" type="range" min="1" max="100" step="1" />
+            </div>
+            <div id="androidMonoCustom" class="btn-row" hidden>
+              <button id="androidMonoPick" class="btn small" type="button">Choose image…</button>
+              <button id="androidMonoClear" class="btn small ghost" type="button" hidden>Clear</button>
+              <span id="androidMonoName" class="muted small-text"></span>
+            </div>
+
+            <label class="check mt-sm" title="Crop away pre-rounded corners so the source fills the square">
+              <input id="androidStripCorners" type="checkbox" /> Strip rounded corners from source
+            </label>
+            <label class="check" title="ic_launcher.png / ic_launcher_round.png for Android 7.1 and older">
+              <input id="androidLegacy" type="checkbox" /> Legacy pre-masked icons (API &lt; 26)
+            </label>
+          </div>
+        </details>
+
         <h2>Sizes &amp; Optical</h2>
         <div id="sizes" class="sizes"></div>
         <div class="slider-row">
@@ -220,12 +326,14 @@
         </div>
 
         <div class="actions">
+          <button id="exportProject" class="btn primary" hidden disabled>Export to project…</button>
           <button id="exportOne" class="btn primary" disabled>Export .ico…</button>
           <button id="exportAll" class="btn primary" hidden disabled>Export all…</button>
           <button id="cancelBatch" class="btn danger" hidden>Cancel batch</button>
           <div class="secondary-actions">
             <button id="exportIcns" class="btn small" disabled>macOS .icns…</button>
             <button id="exportTauri" class="btn small" disabled>Tauri Pack…</button>
+            <button id="exportAndroid" class="btn small" disabled>Android Pack…</button>
             <button id="exportWeb" class="btn small" disabled>Web/PWA Pack…</button>
             <button id="applyFolder" class="btn small" disabled>Apply to Folder…</button>
           </div>
