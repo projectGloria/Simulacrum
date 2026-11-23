@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify the installer without publishing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check release version
+        id: check
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          def read_json(path):
+              return json.loads(Path(path).read_text(encoding="utf-8"))
+
+          def read_toml(path):
+              return tomllib.loads(Path(path).read_text(encoding="utf-8"))
+
+          manifest = read_toml("gloria.toml")
+          version = manifest["version"]
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha\.(0|[1-9][0-9]*))?", version):
+              raise SystemExit(f"Invalid release version: {version}")
+          npm_lock = read_json("package-lock.json")
+          cargo_package = next(p for p in read_toml("src-tauri/Cargo.lock")["package"] if p["name"] == "simulacrum")
+          for path, actual in {
+              "package.json": read_json("package.json")["version"],
+              "package-lock.json": npm_lock["version"],
+              "package-lock.json (root package)": npm_lock["packages"][""]["version"],
+              "src-tauri/Cargo.toml": read_toml("src-tauri/Cargo.toml")["package"]["version"],
+              "src-tauri/Cargo.lock": cargo_package["version"],
+              "src-tauri/tauri.conf.json": read_json("src-tauri/tauri.conf.json")["version"],
+          }.items():
+              if actual != version:
+                  raise SystemExit(f"{path} has {actual}, expected {version}")
+
+          previous = None
+          before = os.environ.get("BEFORE", "")
+          if os.environ["GITHUB_EVENT_NAME"] == "push" and before != "0" * 40:
+              previous_package = subprocess.check_output(
+                  ["git", "show", f"{before}:package.json"], text=True, encoding="utf-8"
+              )
+              previous = json.loads(previous_package)["version"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"version={version}", file=output)
+              print(f"build={str(version != previous).lower()}", file=output)
+          PY
+
+  build:
+    runs-on: windows-latest
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup default stable-x86_64-pc-windows-msvc
+          npm ci
+      - name: Build and test the Windows application
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm run tauri build -- --ci --no-bundle --target x86_64-pc-windows-msvc -- --locked
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+      - name: Pack and verify the GloriaSetup installer
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $staging = Join-Path $env:RUNNER_TEMP 'simulacrum-app'
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item -LiteralPath 'src-tauri/target/x86_64-pc-windows-msvc/release/simulacrum.exe' -Destination $staging
+
+          $bootstrapper = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $bootstrapper
+          $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapper
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|, )O=Microsoft Corporation(?:,|$)') {
+            throw 'The WebView2 bootstrapper must carry a valid Microsoft signature.'
+          }
+
+          npx --yes gloria-setup@0.2.0 --app $staging --manifest gloria.toml --version $env:VERSION --out dist --webview2-bootstrapper $bootstrapper
+          $installer = "dist/Simulacrum_$($env:VERSION)_x64-setup.exe"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw "Expected installer not found: $installer"
+          }
+          $process = Start-Process -FilePath $installer -ArgumentList '/S --dry-run' -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "GloriaSetup dry-run failed with exit code $($process.ExitCode)"
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer
+          path: dist/Simulacrum_${{ needs.version.outputs.version }}_x64-setup.exe
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [version, build]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || !inputs.dry_run)
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: installer
+          path: release-assets
+      - name: Publish verified release assets
+        shell: bash
+        working-directory: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          installer="Simulacrum_${VERSION}_x64-setup.exe"
+          sha256sum "$installer" > SHA256SUMS.txt
+
+          if ! draft=$(gh release view "$tag" --json isDraft --jq .isDraft); then
+            flags=()
+            if [[ "$VERSION" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes --draft "${flags[@]}"
+            draft=true
+          fi
+
+          if [[ "$draft" == true ]]; then
+            target=$(gh release view "$tag" --json targetCommitish --jq .targetCommitish)
+            if [[ "$target" != "$GITHUB_SHA" ]]; then
+              echo "Draft $tag targets $target, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+            gh release upload "$tag" "$installer" SHA256SUMS.txt --clobber
+          fi
+
+          verified=$(mktemp -d)
+          gh release download "$tag" --pattern "$installer" --pattern SHA256SUMS.txt --dir "$verified"
+          (cd "$verified" && sha256sum --check SHA256SUMS.txt)
+          if [[ "$draft" == true ]]; then
+            cmp SHA256SUMS.txt "$verified/SHA256SUMS.txt"
+            gh release edit "$tag" --draft=false
+          fi

@@ -6,7 +6,7 @@
 
 **Fast, pixel-perfect multi-size icon maker for Windows**
 
-[![Version](https://img.shields.io/badge/version-1.0.0--beta.1-blue.svg)](https://github.com/projectGloria/Simulacrum/releases)
+[![Version](https://img.shields.io/github/v/release/projectGloria/Simulacrum)](https://github.com/projectGloria/Simulacrum/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4.svg?logo=windows&logoColor=white)](https://github.com/projectGloria/Simulacrum)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-24c8db.svg?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![Rust](https://img.shields.io/badge/Rust-2021%20edition-dea584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -115,11 +115,7 @@ flowchart TD
 
 ### Prebuilt Binaries
 
-Download the latest installer or portable executable from the [GitHub Releases](https://github.com/projectGloria/Simulacrum/releases) page:
-
-- **NSIS Setup Installer**: `Simulacrum_1.0.0-beta.1_x64-setup.exe`
-- **MSI Enterprise Installer**: `Simulacrum_1.0.0-beta.1_x64_en-US.msi`
-- **Standalone Executable**: `simulacrum.exe`
+Download the Windows x64 GloriaSetup installer from [GitHub Releases](https://github.com/projectGloria/Simulacrum/releases). Each release includes `SHA256SUMS.txt` for verifying the installer.
 
 ---
 
@@ -153,7 +149,7 @@ Download the latest installer or portable executable from the [GitHub Releases](
   rustup default stable-x86_64-pc-windows-msvc
   ```
 - **Microsoft C++ Build Tools** (Visual Studio Installer → *Desktop development with C++*)
-- **Node.js** ≥ 18 and **npm**
+- **Node.js** 22.12 or later in the 22.x series, and **npm**
 
 ### Build Steps
 
@@ -165,7 +161,7 @@ Download the latest installer or portable executable from the [GitHub Releases](
 
 2. **Install frontend dependencies**:
    ```bash
-   npm install
+   npm ci
    ```
 
 3. **Run the local development server** (starts Vite on port `1430` and boots the Tauri client):
@@ -173,30 +169,20 @@ Download the latest installer or portable executable from the [GitHub Releases](
    npm run tauri dev
    ```
 
-4. **Compile production release packages**:
+4. **Compile the Windows x64 release executable**:
    ```bash
-   npm run tauri build
+   npm run tauri build -- --no-bundle --target x86_64-pc-windows-msvc -- --locked
    ```
 
-Artifacts will be produced in `src-tauri/target/release/`:
-- Executable: `src-tauri/target/release/simulacrum.exe`
-- NSIS installer: `src-tauri/target/release/bundle/nsis/Simulacrum_1.0.0-beta.1_x64-setup.exe`
-- MSI installer: `src-tauri/target/release/bundle/msi/Simulacrum_1.0.0-beta.1_x64_en-US.msi`
+The executable is written to `src-tauri/target/x86_64-pc-windows-msvc/release/simulacrum.exe`.
 
 ---
 
 ## How to Release
 
-GitHub Actions automatically builds the Windows NSIS (`.exe`) and MSI (`.msi`) installers whenever a version tag (`v*`) is pushed or the **Build Installers** workflow is triggered manually.
-
-1. Update the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` (`version` and `bundle.windows.wix.version`), then commit your changes.
-2. Create and push a version tag:
-   ```bash
-   git tag v1.0.0 && git push --tags
-   ```
-3. **Where to download the installers**:
-   - **Tag builds**: Published automatically on the [GitHub Releases](https://github.com/projectGloria/Simulacrum/releases) page (and also available as the **`installers`** artifact on the workflow run).
-   - **Manual builds** (*Actions → Build Installers → Run workflow*): Download the **`installers`** artifact from the completed run in the **Actions** tab.
+1. Update the app version in `gloria.toml`, `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`.
+2. Commit the version bump and push to `main`. The **Release** workflow builds and tests the app, builds the GloriaSetup installer, and publishes the verified installer and checksum to [GitHub Releases](https://github.com/projectGloria/Simulacrum/releases).
+3. To test packaging without publishing, run **Release** manually in the **Actions** tab with **Build and verify the installer without publishing** enabled. The installer is available in the completed run's artifacts.
 
 ---
 
