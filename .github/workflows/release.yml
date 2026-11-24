@@ -91,12 +91,13 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           rustup default stable-x86_64-pc-windows-msvc
           npm ci
-      - name: Build and test the Windows application
+      - name: Test and build the Windows application
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          npm run tauri build -- --ci --no-bundle --target x86_64-pc-windows-msvc -- --locked
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+          # Cargo integration tests also build the executable. Build the installer payload last.
+          npm run tauri build -- --ci --no-bundle --target x86_64-pc-windows-msvc -- --locked
       - name: Pack and verify the GloriaSetup installer
         shell: pwsh
         env:
