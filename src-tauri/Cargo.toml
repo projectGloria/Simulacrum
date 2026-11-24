@@ -1,6 +1,6 @@
 [package]
 name = "simulacrum"
-version = "2.0.2"
+version = "2.0.3"
 description = "Shape images and export multi-size .ico files"
 edition = "2021"
 
