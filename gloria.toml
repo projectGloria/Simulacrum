@@ -1,6 +1,6 @@
 id = "Simulacrum"
 name = "Simulacrum"
-version = "2.0.1"
+version = "2.0.2"
 main_exe = "simulacrum.exe"
 icon = "src-tauri/icons/icon.ico"
 accent = "#6c8cff"

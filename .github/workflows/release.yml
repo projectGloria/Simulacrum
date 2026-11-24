@@ -115,7 +115,7 @@ jobs:
             throw 'The WebView2 bootstrapper must carry a valid Microsoft signature.'
           }
 
-          npx --yes gloria-setup@0.2.0 --app $staging --manifest gloria.toml --version $env:VERSION --out dist --webview2-bootstrapper $bootstrapper
+          npx --yes gloria-setup@0.2.4 --app $staging --manifest gloria.toml --version $env:VERSION --out dist --webview2-bootstrapper $bootstrapper
           $installer = "dist/Simulacrum_$($env:VERSION)_x64-setup.exe"
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
             throw "Expected installer not found: $installer"
